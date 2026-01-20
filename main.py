@@ -1,5 +1,12 @@
 import os
-
+from telegram.ext import (
+    ApplicationBuilder,
+    CommandHandler,
+    MessageHandler,
+    CallbackQueryHandler,
+    ContextTypes,
+    filters,
+)
 
 async def send_question(chat_id: int, context: ContextTypes.DEFAULT_TYPE):
     row = db.get(chat_id)
