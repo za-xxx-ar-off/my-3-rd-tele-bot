@@ -36,7 +36,7 @@ def telegram_webhook():
         request.get_json(force=True),
         application.bot
     )
-    loop.create_task(application.process_update(update))
+    loop.run_until_complete(application.process_update(update))
     return "OK", 200
 
 @flask_app.get("/")
