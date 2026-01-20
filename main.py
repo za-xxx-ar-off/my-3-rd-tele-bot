@@ -1,5 +1,5 @@
 import os
-import asyncio
+import json
 from flask import Flask, request
 
 from telegram import Update
@@ -8,60 +8,57 @@ from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 import gspread
 from google.oauth2.service_account import Credentials
 
-# ===== ENV =====
+# ========= ENV =========
 TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
-PORT = int(os.environ.get("PORT", 10000))
-GSHEET_CRED_JSON = os.environ["GSHEET_CRED_JSON"]  # JSON credentials в виде строки
-GSHEET_NAME = os.environ.get("GSHEET_NAME", "Sheet1")
+GSHEET_CRED_JSON = os.environ["GSHEET_CRED_JSON"]
+SPREADSHEET_ID = os.environ["SPREADSHEET_ID"]  # ID таблицы из URL
 
-# ===== GOOGLE SHEETS =====
-creds_dict = eval(GSHEET_CRED_JSON)  # Конвертируем строку в dict
-creds = Credentials.from_service_account_info(creds_dict)
+# ========= GOOGLE SHEETS =========
+creds_dict = json.loads(GSHEET_CRED_JSON)
+scopes = ["https://www.googleapis.com/auth/spreadsheets",
+          "https://www.googleapis.com/auth/drive"]
+creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
 gc = gspread.authorize(creds)
-sheet = gc.open_by_key(creds_dict["private_key_id"]).sheet1  # или по имени
+sheet = gc.open_by_key(SPREADSHEET_ID).sheet1
 
-# ===== BOT =====
+# ========= BOT HANDLERS =========
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Бот работает через webhook ✅")
 
-async def add(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.args:
-        await update.message.reply_text("Использование: /add <текст>")
-        return
+async def add_row(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Добавляет строку в Google Sheet"""
     text = " ".join(context.args)
+    if not text:
+        await update.message.reply_text("Надо указать текст после команды, например:\n/addrow Привет мир")
+        return
     sheet.append_row([text])
-    await update.message.reply_text(f"Добавлено: {text}")
+    await update.message.reply_text(f"Добавлено в таблицу: {text}")
 
-async def list_sheet(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    values = sheet.get_all_values()
-    if not values:
-        await update.message.reply_text("Таблица пуста.")
+async def get_row(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Возвращает последнюю строку таблицы"""
+    rows = sheet.get_all_values()
+    if rows:
+        await update.message.reply_text(f"Последняя строка: {rows[-1]}")
     else:
-        text = "\n".join([", ".join(row) for row in values])
-        await update.message.reply_text(f"Содержимое таблицы:\n{text}")
+        await update.message.reply_text("Таблица пуста.")
 
-# ===== APPLICATION =====
+# ========= TELEGRAM =========
 application = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
 application.add_handler(CommandHandler("start", start))
-application.add_handler(CommandHandler("add", add))
-application.add_handler(CommandHandler("list", list_sheet))
+application.add_handler(CommandHandler("addrow", add_row))
+application.add_handler(CommandHandler("getrow", get_row))
 
-# Инициализация бота один раз
-asyncio.run(application.initialize())
-asyncio.run(application.start())
-
-# ===== FLASK =====
+# ========= FLASK =========
 flask_app = Flask(__name__)
 
-@flask_app.route(f"/{TELEGRAM_TOKEN}", methods=["POST"])
+@flask_app.post(f"/{TELEGRAM_TOKEN}")
 def telegram_webhook():
+    from telegram import Update
     update = Update.de_json(request.get_json(force=True), application.bot)
-    asyncio.run(application.process_update(update))
+    import asyncio
+    asyncio.run(application.process_update(update))  # безопасно в Flask
     return "OK", 200
 
-@flask_app.route("/", methods=["GET"])
+@flask_app.get("/")
 def health():
     return "OK", 200
-
-if __name__ == "__main__":
-    flask_app.run(host="0.0.0.0", port=PORT)
