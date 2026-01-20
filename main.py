@@ -9,49 +9,44 @@ from telegram.ext import (
     ContextTypes,
 )
 
-# ========= ENV =========
+# ================== ENV ==================
 TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
 PORT = int(os.environ.get("PORT", 10000))
 
-# Google Sheets (заготовка)
-SHEET_ID = os.environ.get("SHEET_ID")
-GOOGLE_SERVICE_ACCOUNT_JSON = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON")
-SHEET_NAME = os.environ.get("SHEET_NAME")
-
-# ========= BOT HANDLERS =========
+# ================== BOT ==================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Ответ на команду /start"""
     await update.message.reply_text("Бот работает через webhook ✅")
 
-# ========= APPLICATION =========
+# ================== APPLICATION ==================
+# Создаем приложение бота
 application = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
 application.add_handler(CommandHandler("start", start))
 
-# 🔑 создаём event loop один раз
+# 🔑 Создаем event loop и инициализируем приложение
 loop = asyncio.new_event_loop()
 asyncio.set_event_loop(loop)
 loop.run_until_complete(application.initialize())
 loop.run_until_complete(application.start())
 
-# ========= FLASK =========
+# ================== FLASK ==================
 flask_app = Flask(__name__)
 
-@flask_app.post(f"/{TELEGRAM_TOKEN}")
+# Webhook route для Telegram
+@flask_app.route(f"/{TELEGRAM_TOKEN}", methods=["POST"])
 def telegram_webhook():
-    """Webhook для Telegram"""
-    try:
-        data = request.get_json(force=True)
-        update = Update.de_json(data, application.bot)
-        loop.run_until_complete(application.process_update(update))  # ждём обработки
-        return "OK", 200
-    except Exception as e:
-        print("Webhook error:", e)
-        return "Internal Server Error", 500
-
-@flask_app.get("/")
-def health():
-    """Проверка, что сервис жив"""
+    """Обработка входящих обновлений от Telegram через webhook"""
+    update = Update.de_json(request.get_json(force=True), application.bot)
+    # Используем create_task, чтобы не блокировать Flask
+    application.create_task(application.process_update(update))
     return "OK", 200
 
-# ========= MAIN =========
+# Простая проверка работоспособности
+@flask_app.route("/", methods=["GET"])
+def health():
+    return "OK", 200
+
+# ================== RUN ==================
 if __name__ == "__main__":
+    # Flask будет слушать порт Render
     flask_app.run(host="0.0.0.0", port=PORT)
