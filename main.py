@@ -5,10 +5,18 @@ import logging
 
 from flask import Flask, request
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
+from telegram.ext import (
+    Application,
+    CommandHandler,
+    CallbackQueryHandler,
+    ContextTypes,
+)
+
+import gspread
+from google.oauth2.service_account import Credentials
 
 # -------------------------------------------------
-# ЛОГИ
+# Логи
 # -------------------------------------------------
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -16,51 +24,39 @@ logger = logging.getLogger(__name__)
 # -------------------------------------------------
 # ENV
 # -------------------------------------------------
-BOT_TOKEN = os.environ["BOT_TOKEN"]  # токен бота
-BASE_URL = os.environ["RENDER_EXTERNAL_URL"]  # https://xxx.onrender.com
-
+BOT_TOKEN = os.environ["BOT_TOKEN"]
+BASE_URL = os.environ["RENDER_EXTERNAL_URL"]  # Например: https://my-bot.onrender.com
 WEBHOOK_PATH = f"/{BOT_TOKEN}"
 WEBHOOK_URL = BASE_URL + WEBHOOK_PATH
 
 # -------------------------------------------------
-# FLASK
+# Flask
 # -------------------------------------------------
 flask_app = Flask(__name__)
 
 # -------------------------------------------------
-# TELEGRAM APPLICATION (ASYNC)
+# Telegram Application (async)
 # -------------------------------------------------
 application = Application.builder().token(BOT_TOKEN).build()
-
-# создаём event loop ОДИН раз
-loop = asyncio.new_event_loop()
-asyncio.set_event_loop(loop)
+loop = asyncio.get_event_loop()
 
 # -------------------------------------------------
-# JSON ФАЙЛ ДЛЯ ОТВЕТОВ
+# Google Sheets setup
 # -------------------------------------------------
-JSON_FILE = "answers.json"
-
-# Создаём файл если не существует
-if not os.path.exists(JSON_FILE):
-    with open(JSON_FILE, "w", encoding="utf-8") as f:
-        json.dump({}, f, ensure_ascii=False, indent=4)
-
-def save_answer(user_id, username, answer):
-    """Сохраняет ответ пользователя в JSON файл"""
-    with open(JSON_FILE, "r", encoding="utf-8") as f:
-        data = json.load(f)
-
-    data[str(user_id)] = {
-        "username": username,
-        "answer": answer
-    }
-
-    with open(JSON_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=4)
+# Файл service_account.json должен быть в проекте или через env переменную
+SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
+creds_json = os.environ.get("GOOGLE_CREDS_JSON")  # JSON строки
+if creds_json:
+    creds_dict = json.loads(creds_json)
+    creds = Credentials.from_service_account_info(creds_dict, scopes=SCOPES)
+    gc = gspread.authorize(creds)
+    SHEET = gc.open("BotResponses").sheet1  # Название таблицы
+else:
+    SHEET = None
+    logger.warning("Google Sheets credentials not found. Ответы не сохраняются.")
 
 # -------------------------------------------------
-# HANDLERS
+# Handlers
 # -------------------------------------------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
@@ -81,6 +77,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=InlineKeyboardMarkup(keyboard),
     )
 
+
 async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -97,8 +94,12 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     answer = answer_map.get(query.data, "Неизвестно")
 
-    # Сохраняем ответ в JSON
-    save_answer(user.id, username_or_id, answer)
+    # Сохраняем в Google Sheets (если подключено)
+    if SHEET:
+        try:
+            SHEET.append_row([username_or_id, answer])
+        except Exception as e:
+            logger.error(f"Ошибка при записи в Google Sheets: {e}")
 
     await query.edit_message_text(
         text=f"Спасибо за ответ 🙌\n\n"
@@ -106,39 +107,40 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
              f"📌 Ответ: {answer}"
     )
 
+
 # -------------------------------------------------
-# REGISTER HANDLERS
+# Register handlers
 # -------------------------------------------------
 application.add_handler(CommandHandler("start", start))
 application.add_handler(CallbackQueryHandler(buttons))
 
 # -------------------------------------------------
-# FLASK ROUTES
+# Webhook Flask routes
 # -------------------------------------------------
 @flask_app.route("/", methods=["GET"])
 def index():
     return "Bot is running", 200
 
+
 @flask_app.route(WEBHOOK_PATH, methods=["POST"])
 def telegram_webhook():
     data = request.get_json(force=True)
     update = Update.de_json(data, application.bot)
-
-    # Обработка update синхронно через loop
     loop.run_until_complete(application.process_update(update))
     return "OK", 200
 
 # -------------------------------------------------
-# WEBHOOK SETUP
+# Setup webhook
 # -------------------------------------------------
 async def setup_webhook():
+    await application.initialize()  # <- важно!
     await application.bot.set_webhook(WEBHOOK_URL)
     logger.info(f"Webhook set to {WEBHOOK_URL}")
 
 loop.run_until_complete(setup_webhook())
 
 # -------------------------------------------------
-# ENTRYPOINT FOR GUNICORN
+# Entrypoint for Gunicorn / Render
 # -------------------------------------------------
 if __name__ == "__main__":
     flask_app.run(host="0.0.0.0", port=10000)
