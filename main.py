@@ -4,17 +4,8 @@ import asyncio
 import logging
 
 from flask import Flask, request
-from telegram import (
-    Update,
-    InlineKeyboardButton,
-    InlineKeyboardMarkup,
-)
-from telegram.ext import (
-    Application,
-    CommandHandler,
-    CallbackQueryHandler,
-    ContextTypes,
-)
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
 
 # -------------------------------------------------
 # ЛОГИ
@@ -46,6 +37,29 @@ loop = asyncio.new_event_loop()
 asyncio.set_event_loop(loop)
 
 # -------------------------------------------------
+# JSON ФАЙЛ ДЛЯ ОТВЕТОВ
+# -------------------------------------------------
+JSON_FILE = "answers.json"
+
+# Создаём файл если не существует
+if not os.path.exists(JSON_FILE):
+    with open(JSON_FILE, "w", encoding="utf-8") as f:
+        json.dump({}, f, ensure_ascii=False, indent=4)
+
+def save_answer(user_id, username, answer):
+    """Сохраняет ответ пользователя в JSON файл"""
+    with open(JSON_FILE, "r", encoding="utf-8") as f:
+        data = json.load(f)
+
+    data[str(user_id)] = {
+        "username": username,
+        "answer": answer
+    }
+
+    with open(JSON_FILE, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=4)
+
+# -------------------------------------------------
 # HANDLERS
 # -------------------------------------------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -67,7 +81,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=InlineKeyboardMarkup(keyboard),
     )
 
-
 async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -84,7 +97,9 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     answer = answer_map.get(query.data, "Неизвестно")
 
-    # ПОКА просто подтверждаем (Sheets добавим позже)
+    # Сохраняем ответ в JSON
+    save_answer(user.id, username_or_id, answer)
+
     await query.edit_message_text(
         text=f"Спасибо за ответ 🙌\n\n"
              f"👤 Пользователь: {username_or_id}\n"
@@ -98,26 +113,20 @@ application.add_handler(CommandHandler("start", start))
 application.add_handler(CallbackQueryHandler(buttons))
 
 # -------------------------------------------------
-# FLASK ROUTES (ТОЛЬКО SYNC!)
+# FLASK ROUTES
 # -------------------------------------------------
 @flask_app.route("/", methods=["GET"])
 def index():
     return "Bot is running", 200
 
-
 @flask_app.route(WEBHOOK_PATH, methods=["POST"])
 def telegram_webhook():
     data = request.get_json(force=True)
-
     update = Update.de_json(data, application.bot)
 
-    # КЛЮЧЕВОЙ МОМЕНТ — никаких create_task
-    loop.run_until_complete(
-        application.process_update(update)
-    )
-
+    # Обработка update синхронно через loop
+    loop.run_until_complete(application.process_update(update))
     return "OK", 200
-
 
 # -------------------------------------------------
 # WEBHOOK SETUP
@@ -125,7 +134,6 @@ def telegram_webhook():
 async def setup_webhook():
     await application.bot.set_webhook(WEBHOOK_URL)
     logger.info(f"Webhook set to {WEBHOOK_URL}")
-
 
 loop.run_until_complete(setup_webhook())
 
