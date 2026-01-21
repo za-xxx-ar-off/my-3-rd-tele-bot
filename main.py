@@ -43,17 +43,21 @@ loop = asyncio.get_event_loop()
 # -------------------------------------------------
 # Google Sheets setup
 # -------------------------------------------------
-# Файл service_account.json должен быть в проекте или через env переменную
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
-creds_json = os.environ.get("GOOGLE_CREDS_JSON")  # JSON строки
+creds_json = os.environ.get("GOOGLE_CREDS_JSON")  # JSON строки из Render env
 if creds_json:
     creds_dict = json.loads(creds_json)
     creds = Credentials.from_service_account_info(creds_dict, scopes=SCOPES)
     gc = gspread.authorize(creds)
-    SHEET = gc.open("BotResponses").sheet1  # Название таблицы
+    try:
+        SHEET = gc.open("бот фукуок вьетнам").sheet1  # Новое название таблицы
+        logger.info("Google Sheets подключена")
+    except Exception as e:
+        SHEET = None
+        logger.error(f"Не удалось открыть таблицу: {e}")
 else:
     SHEET = None
-    logger.warning("Google Sheets credentials not found. Ответы не сохраняются.")
+    logger.warning("Google Sheets credentials не найдены. Ответы не сохраняются.")
 
 # -------------------------------------------------
 # Handlers
@@ -133,7 +137,7 @@ def telegram_webhook():
 # Setup webhook
 # -------------------------------------------------
 async def setup_webhook():
-    await application.initialize()  # <- важно!
+    await application.initialize()  # <- важно для PTB v22+
     await application.bot.set_webhook(WEBHOOK_URL)
     logger.info(f"Webhook set to {WEBHOOK_URL}")
 
