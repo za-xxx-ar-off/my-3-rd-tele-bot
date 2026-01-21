@@ -20,11 +20,11 @@ from google.oauth2.service_account import Credentials
 
 # ================== CONFIG ==================
 
-BOT_TOKEN = os.environ["BOT_TOKEN"]
+TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
 SPREADSHEET_ID = os.environ["SPREADSHEET_ID"]
 GSHEET_CRED_JSON = os.environ["GSHEET_CRED_JSON"]
 
-WEBHOOK_PATH = f"/{BOT_TOKEN}"
+WEBHOOK_PATH = f"/{TELEGRAM_TOKEN}"
 WEBHOOK_URL = os.environ.get("WEBHOOK_URL") + WEBHOOK_PATH
 
 logging.basicConfig(level=logging.INFO)
