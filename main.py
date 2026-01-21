@@ -48,11 +48,102 @@ SHEET = None
 
 try:
     creds_json = os.environ.get("GOOGLE_CREDS_JSON")
-
     if not creds_json:
         raise RuntimeError("GOOGLE_CREDS_JSON не задан")
 
     creds_dict = json.loads(creds_json)
 
-    # 🔥 КЛЮЧЕВОЙ МОМЕНТ — ВОССТАНОВЛЕНИЕ ПЕРЕНОСОВ СТРОК
-    creds_dict["priv]()_
+    # ВАЖНО: восстановление переносов строк в ключе
+    creds_dict["private_key"] = creds_dict["private_key"].replace("\\n", "\n")
+
+    creds = Credentials.from_service_account_info(
+        creds_dict,
+        scopes=["https://www.googleapis.com/auth/spreadsheets"],
+    )
+
+    gc = gspread.authorize(creds)
+    SHEET = gc.open("бот фукуок вьетнам").sheet1
+
+    logger.info("✅ Google Sheets подключена")
+
+except Exception as e:
+    logger.error(f"❌ Google Sheets ошибка: {e}")
+    SHEET = None
+
+# -------------------------------------------------
+# HANDLERS
+# -------------------------------------------------
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    keyboard = [
+        [
+            InlineKeyboardButton("✅ Был", callback_data="been"),
+            InlineKeyboardButton("❌ Не был", callback_data="not_been"),
+        ],
+        [
+            InlineKeyboardButton("⭐ Хочу побывать", callback_data="want"),
+            InlineKeyboardButton("⏭ Пропустить", callback_data="skip"),
+        ],
+    ]
+
+    await update.message.reply_text(
+        "Привет! 👋\n\n"
+        "Я буду задавать вопросы о местах на острове Фукуок 🇻🇳",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+    )
+
+
+async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    user = query.from_user
+    username = user.username or str(user.id)
+
+    answer_map = {
+        "been": "Был",
+        "not_been": "Не был",
+        "want": "Хочу побывать",
+        "skip": "Пропущено",
+    }
+
+    answer = answer_map.get(query.data, "Неизвестно")
+
+    if SHEET:
+        try:
+            SHEET.append_row([username, answer])
+        except Exception as e:
+            logger.error(f"Ошибка записи в Google Sheets: {e}")
+
+    await query.edit_message_text(
+        f"Спасибо 🙌\n\n👤 {username}\n📌 {answer}"
+    )
+
+# -------------------------------------------------
+# REGISTER HANDLERS
+# -------------------------------------------------
+application.add_handler(CommandHandler("start", start))
+application.add_handler(CallbackQueryHandler(buttons))
+
+# -------------------------------------------------
+# FLASK ROUTES
+# -------------------------------------------------
+@flask_app.route("/", methods=["GET"])
+def index():
+    return "Bot is running", 200
+
+
+@flask_app.route(WEBHOOK_PATH, methods=["POST"])
+def telegram_webhook():
+    update = Update.de_json(request.get_json(force=True), application.bot)
+    loop.run_until_complete(application.process_update(update))
+    return "OK", 200
+
+# -------------------------------------------------
+# WEBHOOK SETUP
+# -------------------------------------------------
+async def setup():
+    await application.initialize()
+    await application.bot.set_webhook(WEBHOOK_URL)
+    logger.info(f"Webhook set to {WEBHOOK_URL}")
+
+loop.run_until_complete(setup())
