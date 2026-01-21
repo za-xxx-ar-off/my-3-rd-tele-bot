@@ -1,5 +1,4 @@
 import os
-import json
 import asyncio
 import logging
 
@@ -20,7 +19,7 @@ logger = logging.getLogger(__name__)
 # ENV
 # -------------------------------------------------
 BOT_TOKEN = os.environ["BOT_TOKEN"]
-BASE_URL = os.environ["RENDER_EXTERNAL_URL"]  # Например: https://my-bot.onrender.com
+BASE_URL = os.environ["RENDER_EXTERNAL_URL"]
 WEBHOOK_PATH = f"/{BOT_TOKEN}"
 WEBHOOK_URL = BASE_URL + WEBHOOK_PATH
 
@@ -30,35 +29,40 @@ WEBHOOK_URL = BASE_URL + WEBHOOK_PATH
 flask_app = Flask(__name__)
 
 # -------------------------------------------------
-# Telegram Application (async)
+# Telegram Application
 # -------------------------------------------------
-application = (
-    Application.builder()
-    .token(BOT_TOKEN)
-    .read_timeout(15)   # увеличиваем таймауты
-    .write_timeout(15)
-    .build()
-)
+application = Application.builder().token(BOT_TOKEN).build()
+loop = asyncio.get_event_loop()
 
 # -------------------------------------------------
-# Google Sheets setup
+# Google Sheets
 # -------------------------------------------------
-SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
-creds_json = os.environ.get("GOOGLE_CREDS_JSON")  # JSON строки из Render env
+SHEET = None
+try:
+    client_email = os.environ.get("GOOGLE_CLIENT_EMAIL")
+    private_key = os.environ.get("GOOGLE_PRIVATE_KEY")
 
-if creds_json:
-    try:
-        creds_dict = json.loads(creds_json)
-        creds = Credentials.from_service_account_info(creds_dict, scopes=SCOPES)
+    if client_email and private_key:
+        creds = Credentials.from_service_account_info(
+            {
+                "type": "service_account",
+                "client_email": client_email,
+                "private_key": private_key,
+                "token_uri": "https://oauth2.googleapis.com/token",
+            },
+            scopes=["https://www.googleapis.com/auth/spreadsheets"],
+        )
+
         gc = gspread.authorize(creds)
         SHEET = gc.open("бот фукуок вьетнам").sheet1
-        logger.info("Google Sheets подключена")
-    except Exception as e:
-        SHEET = None
-        logger.error(f"Не удалось открыть таблицу: {e}")
-else:
+        logger.info("✅ Google Sheets подключена")
+
+    else:
+        logger.warning("Google Sheets credentials не заданы")
+
+except Exception as e:
+    logger.error(f"❌ Google Sheets ошибка: {e}")
     SHEET = None
-    logger.warning("Google Sheets credentials не найдены. Ответы не сохраняются.")
 
 # -------------------------------------------------
 # Handlers
@@ -77,8 +81,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(
         "Привет! 👋\n\n"
-        "Я буду задавать вопросы о местах на острове Фукуок 🇻🇳\n"
-        "Отвечай кнопками ниже 👇",
+        "Я буду задавать вопросы о местах на острове Фукуок 🇻🇳",
         reply_markup=InlineKeyboardMarkup(keyboard),
     )
 
@@ -88,7 +91,7 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
 
     user = query.from_user
-    username_or_id = user.username or str(user.id)
+    username = user.username or str(user.id)
 
     answer_map = {
         "been": "Был",
@@ -100,15 +103,10 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
     answer = answer_map.get(query.data, "Неизвестно")
 
     if SHEET:
-        try:
-            SHEET.append_row([username_or_id, answer])
-        except Exception as e:
-            logger.error(f"Ошибка при записи в Google Sheets: {e}")
+        SHEET.append_row([username, answer])
 
     await query.edit_message_text(
-        text=f"Спасибо за ответ 🙌\n\n"
-             f"👤 Пользователь: {username_or_id}\n"
-             f"📌 Ответ: {answer}"
+        f"Спасибо 🙌\n\n👤 {username}\n📌 {answer}"
     )
 
 # -------------------------------------------------
@@ -118,7 +116,7 @@ application.add_handler(CommandHandler("start", start))
 application.add_handler(CallbackQueryHandler(buttons))
 
 # -------------------------------------------------
-# Webhook Flask routes
+# Webhook routes
 # -------------------------------------------------
 @flask_app.route("/", methods=["GET"])
 def index():
@@ -127,22 +125,16 @@ def index():
 
 @flask_app.route(WEBHOOK_PATH, methods=["POST"])
 def telegram_webhook():
-    data = request.get_json(force=True)
-    update = Update.de_json(data, application.bot)
-    asyncio.run(application.process_update(update))
+    update = Update.de_json(request.get_json(force=True), application.bot)
+    loop.run_until_complete(application.process_update(update))
     return "OK", 200
 
 # -------------------------------------------------
-# Setup webhook
+# Webhook setup
 # -------------------------------------------------
-async def setup_webhook():
+async def setup():
     await application.initialize()
     await application.bot.set_webhook(WEBHOOK_URL)
     logger.info(f"Webhook set to {WEBHOOK_URL}")
 
-# -------------------------------------------------
-# Entrypoint for Gunicorn / Render
-# -------------------------------------------------
-if __name__ == "__main__":
-    asyncio.run(setup_webhook())
-    flask_app.run(host="0.0.0.0", port=10000)
+loop.run_until_complete(setup())
