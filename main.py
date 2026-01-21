@@ -47,13 +47,14 @@ loop = asyncio.get_event_loop()
 SHEET = None
 
 try:
+    # В Render удобно хранить весь JSON в одной переменной
     creds_json = os.environ.get("GOOGLE_CREDS_JSON")
     if not creds_json:
         raise RuntimeError("GOOGLE_CREDS_JSON не задан")
 
     creds_dict = json.loads(creds_json)
 
-    # ВАЖНО: восстановление переносов строк в ключе
+    # Восстанавливаем переносы строк в private_key
     creds_dict["private_key"] = creds_dict["private_key"].replace("\\n", "\n")
 
     creds = Credentials.from_service_account_info(
