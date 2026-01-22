@@ -13,6 +13,7 @@ from telegram.ext import (
 )
 
 import gspread
+from gspread.exceptions import APIError
 from google.oauth2.service_account import Credentials
 
 # -------------------------------------------------
@@ -47,21 +48,21 @@ loop = asyncio.get_event_loop()
 SHEET = None
 
 try:
-    # В Render удобно хранить весь JSON в одной переменной
     creds_json = os.environ.get("GOOGLE_CREDS_JSON")
     if not creds_json:
         raise RuntimeError("GOOGLE_CREDS_JSON не задан")
 
     creds_dict = json.loads(creds_json)
 
-    # Восстанавливаем переносы строк в private_key
+    # Восстанавливаем переносы строк
     creds_dict["private_key"] = creds_dict["private_key"].replace("\\n", "\n")
 
     creds = Credentials.from_service_account_info(
         creds_dict,
-        scopes=["https://www.googleapis.com/auth/spreadsheets", 
-        "https://www.googleapis.com/auth/drive"]
-
+        scopes=[
+            "https://www.googleapis.com/auth/spreadsheets",
+            "https://www.googleapis.com/auth/drive",
+        ],
     )
 
     gc = gspread.authorize(creds)
@@ -70,7 +71,7 @@ try:
     logger.info("✅ Google Sheets подключена")
 
 except Exception as e:
-    logger.error(f"❌ Google Sheets ошибка: {e}")
+    logger.error(f"❌ Google Sheets ошибка при инициализации: {e}")
     SHEET = None
 
 # -------------------------------------------------
@@ -114,8 +115,15 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if SHEET:
         try:
             SHEET.append_row([username, answer])
+            logger.info(f"✅ Запись в Google Sheets: {username} → {answer}")
+
+        except APIError as e:
+            logger.error(
+                f"❌ Google Sheets API ошибка: {e.response.text if e.response else e}"
+            )
+
         except Exception as e:
-            logger.error(f"Ошибка записи в Google Sheets: {e}")
+            logger.error(f"❌ Общая ошибка записи в Google Sheets: {e}")
 
     await query.edit_message_text(
         f"Спасибо 🙌\n\n👤 {username}\n📌 {answer}"
