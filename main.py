@@ -3,7 +3,7 @@ import json
 import logging
 import re
 
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -30,6 +30,9 @@ BOT_TOKEN = os.environ["BOT_TOKEN"]
 # -------------------------------------------------
 SHEET = None
 
+FIRST_QUESTION_ROW = 2
+QUESTION_COL = 2  # B
+IMAGE_COL = 1     # A
 
 def drive_to_direct(url: str | None) -> str | None:
     """Google Drive → прямая ссылка"""
@@ -58,39 +61,38 @@ def get_user_column(sheet, username: str) -> int:
     return col
 
 
-try:
-    creds_json = os.environ.get("GOOGLE_CREDS_JSON")
-    creds_dict = json.loads(creds_json)
-    creds_dict["private_key"] = creds_dict["private_key"].replace("\\n", "\n")
+def _find_next_question_row(sheet, start_row: int) -> int | None:
+    """Ищет следующую строку с непустым вопросом в колонке QUESTION_COL.
+    Возвращает номер строки или None, если вопросов больше нет."""
+    try:
+        # Получаем все значения таблицы, чтобы корректно определить границы
+        all_values = sheet.get_all_values()
+        max_row = len(all_values) if all_values else 0
+        row = start_row
+        while row <= max_row:
+            val = sheet.cell(row, QUESTION_COL).value
+            if val and val.strip():
+                return row
+            row += 1
+        return None
+    except Exception:
+        logger.exception("❌ Ошибка при поиске следующего вопроса")
+        return None
 
-    creds = Credentials.from_service_account_info(
-        creds_dict,
-        scopes=[
-            "https://www.googleapis.com/auth/spreadsheets",
-            "https://www.googleapis.com/auth/drive",
-        ],
-    )
 
-    gc = gspread.authorize(creds)
-    sh = gc.open("бот фукуок вьетнам")
-    SHEET = sh.sheet1
+async def _send_question_by_row(update_or_query, context: ContextTypes.DEFAULT_TYPE, row: int):
+    """Отправляет вопрос (картинку + текст или только текст) в чат.
+    update_or_query может быть Update.message или CallbackQuery.message"""
+    if SHEET is None:
+        # Если таблица не подключена — уведомляем
+        if hasattr(update_or_query, "reply_text"):
+            await update_or_query.reply_text("Ошибка: Google Sheets недоступна.")
+        else:
+            await update_or_query.message.reply_text("Ошибка: Google Sheets недоступна.")
+        return
 
-    logger.info(f"📄 Найдена таблица: {sh.title}")
-    logger.info("✅ Google Sheets подключена")
-
-except Exception:
-    logger.exception("❌ Google Sheets ошибка")
-    SHEET = None
-
-# -------------------------------------------------
-# HANDLERS
-# -------------------------------------------------
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    row = 2  # текущий вопрос
-    context.user_data["row"] = row
-
-    image_url = drive_to_direct(SHEET.cell(row, 1).value)
-    question_text = SHEET.cell(row, 2).value
+    image_url = drive_to_direct(SHEET.cell(row, IMAGE_COL).value)
+    question_text = SHEET.cell(row, QUESTION_COL).value or " "
 
     keyboard = [
         [
@@ -103,26 +105,58 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ],
     ]
 
+    # Отправляем как новое сообщение (не редактируем предыдущий)
     if image_url:
-        await update.message.reply_photo(
-            photo=image_url,
-            caption=question_text or " "
-        )
+        if hasattr(update_or_query, "reply_photo"):
+            await update_or_query.reply_photo(photo=image_url, caption=question_text)
+        else:
+            await update_or_query.message.reply_photo(photo=image_url, caption=question_text)
     else:
-        await update.message.reply_text(question_text or " ")
+        if hasattr(update_or_query, "reply_text"):
+            await update_or_query.reply_text(question_text)
+        else:
+            await update_or_query.message.reply_text(question_text)
 
-    await update.message.reply_text(
-        "Выбери вариант 👇",
-        reply_markup=InlineKeyboardMarkup(keyboard),
-    )
+    # Подсказка с кнопками
+    if hasattr(update_or_query, "reply_text"):
+        await update_or_query.reply_text("Выбери вариант 👇", reply_markup=InlineKeyboardMarkup(keyboard))
+    else:
+        await update_or_query.message.reply_text("Выбери вариант 👇", reply_markup=InlineKeyboardMarkup(keyboard))
+
+
+# -------------------------------------------------
+# HANDLERS
+# -------------------------------------------------
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Инициализация: находим первый вопрос и отправляем его."""
+    if SHEET is None:
+        await update.message.reply_text("Ошибка: Google Sheets не подключена.")
+        return
+
+    # Найти первый непустой вопрос, начиная с FIRST_QUESTION_ROW
+    row = _find_next_question_row(SHEET, FIRST_QUESTION_ROW)
+    if row is None:
+        await update.message.reply_text("Вопросы не найдены. Обратитесь к администратору.")
+        return
+
+    context.user_data["row"] = row
+    # Отправляем вопрос
+    await _send_question_by_row(update.message, context, row)
 
 
 async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработка нажатий кнопок — запись ответа, защита от перезаписи, автопереход."""
     query = update.callback_query
     await query.answer()
 
+    if SHEET is None:
+        await query.edit_message_text("Ошибка: Google Sheets не подключена.")
+        return
+
     row = context.user_data.get("row")
     if not row:
+        # Если прогресс не установлен — предложим /start
+        await query.edit_message_text("Прогресс не найден. Нажмите /start, чтобы начать.")
         return
 
     user = query.from_user
@@ -139,13 +173,52 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
         col = get_user_column(SHEET, username)
+    except Exception:
+        logger.exception("❌ Ошибка получения колонки пользователя")
+        await query.edit_message_text("Ошибка при определении колонки для записи.")
+        return
+
+    try:
+        # Защита от повторных ответов: если уже есть значение — не перезаписываем
+        existing = SHEET.cell(row, col).value
+        if existing and existing.strip():
+            # Сообщаем пользователю, что ответ уже есть, и переходим к следующему вопросу
+            await query.edit_message_text(f"Вы уже ответили на этот вопрос ранее.\n\n👤 {username}\n📌 {existing}")
+            # Автопереход к следующему вопросу
+            next_row = _find_next_question_row(SHEET, row + 1)
+            if next_row is None:
+                # Вопросы закончились
+                keyboard = ReplyKeyboardMarkup([["/start"]], one_time_keyboard=True, resize_keyboard=True)
+                await query.message.reply_text("Вопросы закончились. Нажмите /start, чтобы начать заново.", reply_markup=keyboard)
+                context.user_data.pop("row", None)
+                return
+            context.user_data["row"] = next_row
+            await _send_question_by_row(query, context, next_row)
+            return
+
+        # Записываем ответ
         SHEET.update_cell(row, col, answer)
     except Exception:
         logger.exception("❌ Ошибка записи в Google Sheets")
+        await query.edit_message_text("Ошибка при записи ответа. Попробуйте позже.")
+        return
 
-    await query.edit_message_text(
-        f"Спасибо 🙌\n\n👤 {username}\n📌 {answer}"
-    )
+    # Подтверждение пользователю (редактируем сообщение с кнопками)
+    await query.edit_message_text(f"Спасибо 🙌\n\n👤 {username}\n📌 {answer}")
+
+    # Автопереход: ищем следующий непустой вопрос
+    next_row = _find_next_question_row(SHEET, row + 1)
+    if next_row is None:
+        # Вопросы закончились — предлагаем /start
+        keyboard = ReplyKeyboardMarkup([["/start"]], one_time_keyboard=True, resize_keyboard=True)
+        await query.message.reply_text("Вопросы закончились. Нажмите /start, чтобы начать заново.", reply_markup=keyboard)
+        context.user_data.pop("row", None)
+        return
+
+    # Обновляем прогресс и отправляем следующий вопрос
+    context.user_data["row"] = next_row
+    await _send_question_by_row(query, context, next_row)
+
 
 # -------------------------------------------------
 # MAIN
@@ -161,4 +234,29 @@ def main():
 
 
 if __name__ == "__main__":
+    # Инициализация Google Sheets вынесена ниже, чтобы ошибки не мешали импорту модуля
+    try:
+        creds_json = os.environ.get("GOOGLE_CREDS_JSON")
+        creds_dict = json.loads(creds_json)
+        creds_dict["private_key"] = creds_dict["private_key"].replace("\\n", "\n")
+
+        creds = Credentials.from_service_account_info(
+            creds_dict,
+            scopes=[
+                "https://www.googleapis.com/auth/spreadsheets",
+                "https://www.googleapis.com/auth/drive",
+            ],
+        )
+
+        gc = gspread.authorize(creds)
+        sh = gc.open("бот фукуок вьетнам")
+        SHEET = sh.sheet1
+
+        logger.info(f"📄 Найдена таблица: {sh.title}")
+        logger.info("✅ Google Sheets подключена")
+
+    except Exception:
+        logger.exception("❌ Google Sheets ошибка")
+        SHEET = None
+
     main()
