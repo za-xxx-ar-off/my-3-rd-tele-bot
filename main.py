@@ -1,6 +1,7 @@
 import os
 import json
 import logging
+import re
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -28,6 +29,25 @@ BOT_TOKEN = os.environ["BOT_TOKEN"]
 # GOOGLE SHEETS
 # -------------------------------------------------
 SHEET = None
+IMAGE_URL = None
+QUESTION_TEXT = None
+
+
+def drive_to_direct(url: str | None) -> str | None:
+    """Преобразует ссылку Google Drive в прямую ссылку"""
+    if not url:
+        return None
+
+    if "drive.google.com" not in url:
+        return url
+
+    match = re.search(r"/d/([a-zA-Z0-9_-]+)", url)
+    if not match:
+        return None
+
+    file_id = match.group(1)
+    return f"https://drive.google.com/uc?id={file_id}"
+
 
 try:
     creds_json = os.environ.get("GOOGLE_CREDS_JSON")
@@ -49,7 +69,13 @@ try:
     sh = gc.open("бот фукуок вьетнам")
     SHEET = sh.sheet1
 
+    # читаем данные
+    IMAGE_URL = drive_to_direct(SHEET.acell("A1").value)
+    QUESTION_TEXT = SHEET.acell("A2").value
+
     logger.info(f"📄 Найдена таблица: {sh.title}")
+    logger.info(f"🖼 IMAGE_URL: {IMAGE_URL}")
+    logger.info(f"📝 QUESTION_TEXT: {QUESTION_TEXT}")
     logger.info("✅ Google Sheets подключена")
 
 except Exception:
@@ -71,9 +97,19 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ],
     ]
 
+    # отправляем фото + текст
+    if IMAGE_URL:
+        await update.message.reply_photo(
+            photo=IMAGE_URL,
+            caption=QUESTION_TEXT or " "
+        )
+    else:
+        await update.message.reply_text(
+            QUESTION_TEXT or " "
+        )
+
     await update.message.reply_text(
-        "Привет! 👋\n\n"
-        "Я буду задавать вопросы о местах на острове Фукуок 🇻🇳",
+        "Выбери вариант 👇",
         reply_markup=InlineKeyboardMarkup(keyboard),
     )
 
