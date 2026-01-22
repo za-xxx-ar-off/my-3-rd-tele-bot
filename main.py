@@ -66,9 +66,12 @@ try:
     )
 
     gc = gspread.authorize(creds)
-    SHEET = gc.open("бот фукуок вьетнам").sheet1
+    sh = gc.open("бот фукуок вьетнам")
+logger.info(f"📄 Найдена таблица: {sh.title}")
+SHEET = sh.sheet1
 
     logger.info("✅ Google Sheets подключена")
+    
 
 except Exception as e:
     logger.error(f"❌ Google Sheets ошибка при инициализации: {e}")
