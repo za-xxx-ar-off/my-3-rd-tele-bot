@@ -29,12 +29,10 @@ BOT_TOKEN = os.environ["BOT_TOKEN"]
 # GOOGLE SHEETS
 # -------------------------------------------------
 SHEET = None
-IMAGE_URL = None
-QUESTION_TEXT = None
 
 
 def drive_to_direct(url: str | None) -> str | None:
-    """Преобразует ссылку Google Drive в прямую ссылку"""
+    """Google Drive → прямая ссылка"""
     if not url:
         return None
 
@@ -45,15 +43,23 @@ def drive_to_direct(url: str | None) -> str | None:
     if not match:
         return None
 
-    file_id = match.group(1)
-    return f"https://drive.google.com/uc?id={file_id}"
+    return f"https://drive.google.com/uc?id={match.group(1)}"
+
+
+def get_user_column(sheet, username: str) -> int:
+    """Возвращает колонку пользователя, создаёт если нет"""
+    header = sheet.row_values(1)
+
+    if username in header:
+        return header.index(username) + 1
+
+    col = len(header) + 1
+    sheet.update_cell(1, col, username)
+    return col
 
 
 try:
     creds_json = os.environ.get("GOOGLE_CREDS_JSON")
-    if not creds_json:
-        raise RuntimeError("GOOGLE_CREDS_JSON не задан")
-
     creds_dict = json.loads(creds_json)
     creds_dict["private_key"] = creds_dict["private_key"].replace("\\n", "\n")
 
@@ -69,13 +75,7 @@ try:
     sh = gc.open("бот фукуок вьетнам")
     SHEET = sh.sheet1
 
-    # читаем данные
-    IMAGE_URL = drive_to_direct(SHEET.acell("A1").value)
-    QUESTION_TEXT = SHEET.acell("A2").value
-
     logger.info(f"📄 Найдена таблица: {sh.title}")
-    logger.info(f"🖼 IMAGE_URL: {IMAGE_URL}")
-    logger.info(f"📝 QUESTION_TEXT: {QUESTION_TEXT}")
     logger.info("✅ Google Sheets подключена")
 
 except Exception:
@@ -86,6 +86,12 @@ except Exception:
 # HANDLERS
 # -------------------------------------------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    row = 2  # текущий вопрос
+    context.user_data["row"] = row
+
+    image_url = drive_to_direct(SHEET.cell(row, 1).value)
+    question_text = SHEET.cell(row, 2).value
+
     keyboard = [
         [
             InlineKeyboardButton("✅ Был", callback_data="been"),
@@ -97,16 +103,13 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ],
     ]
 
-    # отправляем фото + текст
-    if IMAGE_URL:
+    if image_url:
         await update.message.reply_photo(
-            photo=IMAGE_URL,
-            caption=QUESTION_TEXT or " "
+            photo=image_url,
+            caption=question_text or " "
         )
     else:
-        await update.message.reply_text(
-            QUESTION_TEXT or " "
-        )
+        await update.message.reply_text(question_text or " ")
 
     await update.message.reply_text(
         "Выбери вариант 👇",
@@ -118,8 +121,12 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
 
+    row = context.user_data.get("row")
+    if not row:
+        return
+
     user = query.from_user
-    username = user.username or str(user.id)
+    username = f"@{user.username}" if user.username else str(user.id)
 
     answer_map = {
         "been": "Был",
@@ -128,13 +135,13 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "skip": "Пропущено",
     }
 
-    answer = answer_map.get(query.data, "Неизвестно")
+    answer = answer_map.get(query.data, "—")
 
-    if SHEET:
-        try:
-            SHEET.append_row([username, answer])
-        except Exception:
-            logger.exception("❌ Ошибка записи в Google Sheets")
+    try:
+        col = get_user_column(SHEET, username)
+        SHEET.update_cell(row, col, answer)
+    except Exception:
+        logger.exception("❌ Ошибка записи в Google Sheets")
 
     await query.edit_message_text(
         f"Спасибо 🙌\n\n👤 {username}\n📌 {answer}"
