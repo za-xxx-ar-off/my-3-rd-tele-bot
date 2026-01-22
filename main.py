@@ -1,7 +1,9 @@
 import os
+import sys
 import json
-import logging
 import re
+import logging
+import asyncio
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup
 from telegram.ext import (
@@ -10,6 +12,7 @@ from telegram.ext import (
     CallbackQueryHandler,
     ContextTypes,
 )
+from telegram.error import Conflict, TelegramError
 
 import gspread
 from google.oauth2.service_account import Credentials
@@ -38,34 +41,27 @@ def drive_to_direct(url: str | None) -> str | None:
     """Google Drive → прямая ссылка"""
     if not url:
         return None
-
     if "drive.google.com" not in url:
         return url
-
     match = re.search(r"/d/([a-zA-Z0-9_-]+)", url)
     if not match:
         return None
-
     return f"https://drive.google.com/uc?id={match.group(1)}"
 
 
 def get_user_column(sheet, username: str) -> int:
     """Возвращает колонку пользователя, создаёт если нет"""
     header = sheet.row_values(1)
-
     if username in header:
         return header.index(username) + 1
-
     col = len(header) + 1
     sheet.update_cell(1, col, username)
     return col
 
 
 def _find_next_question_row(sheet, start_row: int) -> int | None:
-    """Ищет следующую строку с непустым вопросом в колонке QUESTION_COL.
-    Возвращает номер строки или None, если вопросов больше нет."""
+    """Ищет следующую строку с непустым вопросом в колонке QUESTION_COL."""
     try:
-        # Получаем все значения таблицы, чтобы корректно определить границы
         all_values = sheet.get_all_values()
         max_row = len(all_values) if all_values else 0
         row = start_row
@@ -81,10 +77,8 @@ def _find_next_question_row(sheet, start_row: int) -> int | None:
 
 
 async def _send_question_by_row(update_or_query, context: ContextTypes.DEFAULT_TYPE, row: int):
-    """Отправляет вопрос (картинку + текст или только текст) в чат.
-    update_or_query может быть Update.message или CallbackQuery.message"""
+    """Отправляет вопрос (картинка + текст или только текст) в чат."""
     if SHEET is None:
-        # Если таблица не подключена — уведомляем
         if hasattr(update_or_query, "reply_text"):
             await update_or_query.reply_text("Ошибка: Google Sheets недоступна.")
         else:
@@ -105,7 +99,6 @@ async def _send_question_by_row(update_or_query, context: ContextTypes.DEFAULT_T
         ],
     ]
 
-    # Отправляем как новое сообщение (не редактируем предыдущий)
     if image_url:
         if hasattr(update_or_query, "reply_photo"):
             await update_or_query.reply_photo(photo=image_url, caption=question_text)
@@ -117,7 +110,6 @@ async def _send_question_by_row(update_or_query, context: ContextTypes.DEFAULT_T
         else:
             await update_or_query.message.reply_text(question_text)
 
-    # Подсказка с кнопками
     if hasattr(update_or_query, "reply_text"):
         await update_or_query.reply_text("Выбери вариант 👇", reply_markup=InlineKeyboardMarkup(keyboard))
     else:
@@ -133,14 +125,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Ошибка: Google Sheets не подключена.")
         return
 
-    # Найти первый непустой вопрос, начиная с FIRST_QUESTION_ROW
     row = _find_next_question_row(SHEET, FIRST_QUESTION_ROW)
     if row is None:
         await update.message.reply_text("Вопросы не найдены. Обратитесь к администратору.")
         return
 
     context.user_data["row"] = row
-    # Отправляем вопрос
     await _send_question_by_row(update.message, context, row)
 
 
@@ -155,7 +145,6 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     row = context.user_data.get("row")
     if not row:
-        # Если прогресс не установлен — предложим /start
         await query.edit_message_text("Прогресс не найден. Нажмите /start, чтобы начать.")
         return
 
@@ -168,7 +157,6 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "want": "Хочу побывать",
         "skip": "Пропущено",
     }
-
     answer = answer_map.get(query.data, "—")
 
     try:
@@ -179,15 +167,11 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     try:
-        # Защита от повторных ответов: если уже есть значение — не перезаписываем
         existing = SHEET.cell(row, col).value
         if existing and existing.strip():
-            # Сообщаем пользователю, что ответ уже есть, и переходим к следующему вопросу
             await query.edit_message_text(f"Вы уже ответили на этот вопрос ранее.\n\n👤 {username}\n📌 {existing}")
-            # Автопереход к следующему вопросу
             next_row = _find_next_question_row(SHEET, row + 1)
             if next_row is None:
-                # Вопросы закончились
                 keyboard = ReplyKeyboardMarkup([["/start"]], one_time_keyboard=True, resize_keyboard=True)
                 await query.message.reply_text("Вопросы закончились. Нажмите /start, чтобы начать заново.", reply_markup=keyboard)
                 context.user_data.pop("row", None)
@@ -196,45 +180,60 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await _send_question_by_row(query, context, next_row)
             return
 
-        # Записываем ответ
         SHEET.update_cell(row, col, answer)
     except Exception:
         logger.exception("❌ Ошибка записи в Google Sheets")
         await query.edit_message_text("Ошибка при записи ответа. Попробуйте позже.")
         return
 
-    # Подтверждение пользователю (редактируем сообщение с кнопками)
     await query.edit_message_text(f"Спасибо 🙌\n\n👤 {username}\n📌 {answer}")
 
-    # Автопереход: ищем следующий непустой вопрос
     next_row = _find_next_question_row(SHEET, row + 1)
     if next_row is None:
-        # Вопросы закончились — предлагаем /start
         keyboard = ReplyKeyboardMarkup([["/start"]], one_time_keyboard=True, resize_keyboard=True)
         await query.message.reply_text("Вопросы закончились. Нажмите /start, чтобы начать заново.", reply_markup=keyboard)
         context.user_data.pop("row", None)
         return
 
-    # Обновляем прогресс и отправляем следующий вопрос
     context.user_data["row"] = next_row
     await _send_question_by_row(query, context, next_row)
 
 
 # -------------------------------------------------
-# MAIN
+# MAIN (polling only)
 # -------------------------------------------------
+def _build_application():
+    app = Application.builder().token(BOT_TOKEN).build()
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CallbackQueryHandler(buttons))
+    return app
+
 def main():
-    application = Application.builder().token(BOT_TOKEN).build()
+    application = _build_application()
+    logger.info("🤖 Подготовка к запуску бота (polling)")
 
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CallbackQueryHandler(buttons))
+    async def _run_polling():
+        try:
+            await application.bot.delete_webhook(drop_pending_updates=True)
+            logger.info("🧹 Старый webhook удалён, pending updates сброшены")
+        except TelegramError:
+            logger.exception("⚠️ Не удалось удалить webhook (игнорируем)")
 
-    logger.info("🤖 Бот запущен (polling)")
-    application.run_polling()
+        logger.info("🚀 Запуск polling (drop_pending_updates=True)")
+        await application.run_polling(drop_pending_updates=True)
+
+    try:
+        asyncio.run(_run_polling())
+    except Conflict:
+        logger.exception("❌ Conflict: другой getUpdates уже запущен. Убедитесь, что запущен только один экземпляр бота.")
+        sys.exit(2)
+    except Exception:
+        logger.exception("❌ Неожиданная ошибка при запуске бота")
+        sys.exit(1)
 
 
 if __name__ == "__main__":
-    # Инициализация Google Sheets вынесена ниже, чтобы ошибки не мешали импорту модуля
+    # Инициализация Google Sheets
     try:
         creds_json = os.environ.get("GOOGLE_CREDS_JSON")
         creds_dict = json.loads(creds_json)
