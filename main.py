@@ -212,18 +212,10 @@ def main():
     application = _build_application()
     logger.info("🤖 Подготовка к запуску бота (polling)")
 
-    async def _run_polling():
-        try:
-            await application.bot.delete_webhook(drop_pending_updates=True)
-            logger.info("🧹 Старый webhook удалён, pending updates сброшены")
-        except TelegramError:
-            logger.exception("⚠️ Не удалось удалить webhook (игнорируем)")
-
-        logger.info("🚀 Запуск polling (drop_pending_updates=True)")
-        await application.run_polling(drop_pending_updates=True)
-
     try:
-        asyncio.run(_run_polling())
+        # Запуск polling напрямую — без asyncio.run, чтобы не создавать вложенный event loop
+        logger.info("🚀 Запуск polling (drop_pending_updates=True)")
+        application.run_polling(drop_pending_updates=True)
     except Conflict:
         logger.exception("❌ Conflict: другой getUpdates уже запущен. Убедитесь, что запущен только один экземпляр бота.")
         sys.exit(2)
