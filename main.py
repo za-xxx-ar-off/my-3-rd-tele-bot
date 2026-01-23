@@ -200,7 +200,7 @@ async def ping():  # ← Было async():
 
 
 @app.post("/webhook")
-async(request: Request, background_tasks: BackgroundTasks):
+async def webhook(request: Request, background_tasks: BackgroundTasks):  # ← ИСПРАВЬТЕ!
     """Webhook endpoint для Telegram"""
     if WEBHOOK_SECRET and request.headers.get("X-Telegram-Bot-Api-Secret-Token") != WEBHOOK_SECRET:
         return PlainTextResponse("Unauthorized", status_code=401)
