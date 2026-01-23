@@ -204,10 +204,10 @@ async def ping():  # ← Было async():
 
 
 @app.post("/webhook")
-async def webhook(request: Request, background_tasks: BackgroundTasks):  # ← ИСПРАВЬТЕ!
+async def webhook(request: Request, background_tasks: BackgroundTasks):
     """Webhook endpoint для Telegram"""
-    if WEBHOOK_SECRET and request.headers.get("X-Telegram-Bot-Api-Secret-Token") != WEBHOOK_SECRET:
-        return PlainTextResponse("Unauthorized", status_code=401)
+    # if WEBHOOK_SECRET and request.headers.get("X-Telegram-Bot-Api-Secret-Token") != WEBHOOK_SECRET:
+    #     return PlainTextResponse("Unauthorized", status_code=401)
 
     json_data = await request.json()
     update = Update.de_json(json_data, application.bot)
