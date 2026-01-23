@@ -194,9 +194,10 @@ application.add_handler(CommandHandler("start", start))
 application.add_handler(CallbackQueryHandler(buttons))
 
 @app.get("/ping")
-async():
+async def ping():  # ← Было async():
     """Endpoint для мониторинга, чтобы Render не засыпал"""
     return PlainTextResponse("OK")
+
 
 @app.post("/webhook")
 async(request: Request, background_tasks: BackgroundTasks):
