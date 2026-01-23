@@ -194,6 +194,7 @@ app = FastAPI()
 
 # Инициализация бота и диспетчера
 application = Application.builder().token(BOT_TOKEN).build()
+application.initialize()  # ← КРИТИЧНО!
 application.add_handler(CommandHandler("start", start))
 application.add_handler(CallbackQueryHandler(buttons))
 
