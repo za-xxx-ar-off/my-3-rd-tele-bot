@@ -207,16 +207,12 @@ async def ping():  # ← Было async():
 async def webhook(request: Request, background_tasks: BackgroundTasks):
     """Webhook endpoint для Telegram"""
     json_data = await request.json()
-    logger.info(f"📨 Получен update: {json_data}")  # Отладка
+    logger.info(f"📨 Получен update: {json_data}")
     
     update = Update.de_json(json_data, application.bot)
     if update:
-        # ИНИЦИАЛИЗИРУЕМ ПЕРЕД ОБРАБОТКОЙ!
-        if not application.initialized:
-            application.initialize()
-        
-        await application.process_update(update)
-    
+        **await application.process_update(update)**  # ← ТОЛЬКО ЭТА СТРОКА!
+
     return PlainTextResponse("OK")
 
 @app.on_event("startup")
