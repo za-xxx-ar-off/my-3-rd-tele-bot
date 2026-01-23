@@ -33,9 +33,14 @@ BOT_TOKEN = os.environ["BOT_TOKEN"]
 SHEET = None
 
 FIRST_QUESTION_ROW = 2
-IMAGE_COL = 1     # A
-QUESTION_COL = 2  # B
 
+PHOTO_COL = 1      # A
+TEXT_COL = 2       # B
+USERS_START_COL = 4  # D
+
+# -------------------------------------------------
+# KEYBOARDS
+# -------------------------------------------------
 RESTART_KEYBOARD = InlineKeyboardMarkup(
     [[InlineKeyboardButton("🔄 Начать заново", callback_data="restart")]]
 )
@@ -59,36 +64,48 @@ ANSWER_KEYBOARD = InlineKeyboardMarkup(
 def drive_to_direct(url: str | None) -> str | None:
     if not url:
         return None
+
+    url = url.strip()
+
+    if not url.startswith("http"):
+        return None
+
     if "drive.google.com" not in url:
         return url
+
     match = re.search(r"/d/([a-zA-Z0-9_-]+)", url)
     if not match:
         return None
+
     return f"https://drive.google.com/uc?id={match.group(1)}"
 
 
 def get_user_column(sheet, username: str) -> int:
     header = sheet.row_values(1)
-    if username in header:
-        return header.index(username) + 1
-    col = len(header) + 1
+
+    for idx in range(USERS_START_COL - 1, len(header)):
+        if header[idx] == username:
+            return idx + 1
+
+    col = max(len(header) + 1, USERS_START_COL)
     sheet.update_cell(1, col, username)
     return col
 
 
 def find_next_question_row(sheet, start_row: int) -> int | None:
     values = sheet.get_all_values()
-    row = start_row
-    while row <= len(values):
-        if sheet.cell(row, QUESTION_COL).value:
+
+    for row in range(start_row, len(values) + 1):
+        if sheet.cell(row, TEXT_COL).value:
             return row
-        row += 1
+
     return None
 
 
 async def send_question(target, row: int):
-    image = drive_to_direct(SHEET.cell(row, IMAGE_COL).value)
-    text = SHEET.cell(row, QUESTION_COL).value or " "
+    raw_image = SHEET.cell(row, PHOTO_COL).value
+    image = drive_to_direct(raw_image)
+    text = SHEET.cell(row, TEXT_COL).value or ""
 
     if image:
         await target.reply_photo(photo=image, caption=text)
@@ -102,6 +119,7 @@ async def send_question(target, row: int):
 # -------------------------------------------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     row = find_next_question_row(SHEET, FIRST_QUESTION_ROW)
+
     if row is None:
         await update.message.reply_text("Вопросы не найдены.")
         return
@@ -118,9 +136,11 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if query.data == "restart":
         context.user_data.clear()
         row = find_next_question_row(SHEET, FIRST_QUESTION_ROW)
+
         if row is None:
             await query.edit_message_text("Вопросы не найдены.")
             return
+
         context.user_data["row"] = row
         await send_question(query.message, row)
         return
@@ -139,18 +159,19 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "want": "Хочу побывать",
         "skip": "Пропущено",
     }
+
     answer = answer_map.get(query.data, "—")
 
+    # 🔥 ВАЖНО: ВСЕГДА ОБНОВЛЯЕМ ОТВЕТ
     col = get_user_column(SHEET, username)
-    existing = SHEET.cell(row, col).value
+    SHEET.update_cell(row, col, answer)
 
-    if existing:
-        await query.edit_message_text(f"Вы уже отвечали: {existing}")
-    else:
-        SHEET.update_cell(row, col, answer)
-        await query.edit_message_text(f"Спасибо 🙌\n\n👤 {username}\n📌 {answer}")
+    await query.edit_message_text(
+        f"Ответ сохранён 🙌\n\n👤 {username}\n📌 {answer}"
+    )
 
     next_row = find_next_question_row(SHEET, row + 1)
+
     if next_row is None:
         await query.message.reply_text(
             "✅ Вопросы закончились.\n\nХочешь пройти опрос ещё раз?",
@@ -167,6 +188,7 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # -------------------------------------------------
 def main():
     app = Application.builder().token(BOT_TOKEN).build()
+
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(buttons))
 
