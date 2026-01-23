@@ -3,14 +3,13 @@ import sys
 import json
 import re
 import logging
+from typing import Any
 
+import uvicorn
+from fastapi import FastAPI, Request, BackgroundTasks
+from fastapi.responses import PlainTextResponse
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import (
-    Application,
-    CommandHandler,
-    CallbackQueryHandler,
-    ContextTypes,
-)
+from telegram.ext import Application
 from telegram.error import Conflict
 
 import gspread
@@ -26,6 +25,7 @@ logger = logging.getLogger(__name__)
 # ENV
 # -------------------------------------------------
 BOT_TOKEN = os.environ["BOT_TOKEN"]
+WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "")  # Опционально для безопасности
 
 # -------------------------------------------------
 # GOOGLE SHEETS CONFIG
@@ -102,7 +102,7 @@ def find_next_question_row(sheet, start_row: int) -> int | None:
     return None
 
 
-async def send_question(target, row: int):
+async def send_question(bot_app: Application, target, row: int):
     raw_image = SHEET.cell(row, PHOTO_COL).value
     image = drive_to_direct(raw_image)
     text = SHEET.cell(row, TEXT_COL).value or ""
@@ -117,7 +117,7 @@ async def send_question(target, row: int):
 # -------------------------------------------------
 # HANDLERS
 # -------------------------------------------------
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def start(update: Update, context):
     row = find_next_question_row(SHEET, FIRST_QUESTION_ROW)
 
     if row is None:
@@ -125,10 +125,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     context.user_data["row"] = row
-    await send_question(update.message, row)
+    await send_question(context.application, update.message, row)
 
 
-async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def buttons(update: Update, context):
     query = update.callback_query
     await query.answer()
 
@@ -142,7 +142,7 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         context.user_data["row"] = row
-        await send_question(query.message, row)
+        await send_question(context.application, query.message, row)
         return
 
     row = context.user_data.get("row")
@@ -181,45 +181,82 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     context.user_data["row"] = next_row
-    await send_question(query.message, next_row)
+    await send_question(context.application, query.message, next_row)
+
+# -------------------------------------------------
+# FASTAPI APP
+# -------------------------------------------------
+app = FastAPI()
+
+# Инициализация бота и диспетчера
+application = Application.builder().token(BOT_TOKEN).build()
+application.add_handler(CommandHandler("start", start))
+application.add_handler(CallbackQueryHandler(buttons))
+
+@app.get("/ping")
+async():
+    """Endpoint для мониторинга, чтобы Render не засыпал"""
+    return PlainTextResponse("OK")
+
+@app.post("/webhook")
+async(request: Request, background_tasks: BackgroundTasks):
+    """Webhook endpoint для Telegram"""
+    if WEBHOOK_SECRET and request.headers.get("X-Telegram-Bot-Api-Secret-Token") != WEBHOOK_SECRET:
+        return PlainTextResponse("Unauthorized", status_code=401)
+
+    json_data = await request.json()
+    update = Update.de_json(json_data, application.bot)
+
+    if update:
+        background_tasks.add_task(application.process_update, update)
+
+    return PlainTextResponse("OK")
+
+@app.on_event("startup")
+async def on_startup():
+    """Установка webhook при запуске"""
+    webhook_url = f"https://{os.environ.get('RENDER_EXTERNAL_HOSTNAME', 'your-app.onrender.com')}/webhook"
+    await application.bot.set_webhook(webhook_url)
+    logger.info(f"Webhook установлен: {webhook_url}")
+
+@app.on_event("shutdown")
+async def on_shutdown():
+    """Удаление webhook при остановке"""
+    await application.bot.delete_webhook()
+    logger.info("Webhook удалён")
+
+# -------------------------------------------------
+# GOOGLE SHEETS INIT
+# -------------------------------------------------
+try:
+    creds_dict = json.loads(os.environ["GOOGLE_CREDS_JSON"])
+    creds_dict["private_key"] = creds_dict["private_key"].replace("\\n", "\n")
+
+    creds = Credentials.from_service_account_info(
+        creds_dict,
+        scopes=[
+            "https://www.googleapis.com/auth/spreadsheets",
+            "https://www.googleapis.com/auth/drive",
+        ],
+    )
+
+    gc = gspread.authorize(creds)
+    SHEET = gc.open("бот фукуок вьетнам").sheet1
+
+    logger.info("✅ Google Sheets подключена")
+
+except Exception as e:
+    logger.exception("❌ Ошибка Google Sheets")
+    SHEET = None
 
 # -------------------------------------------------
 # MAIN
 # -------------------------------------------------
-def main():
-    app = Application.builder().token(BOT_TOKEN).build()
-
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CallbackQueryHandler(buttons))
-
-    try:
-        logger.info("🤖 Бот запущен (polling)")
-        app.run_polling(drop_pending_updates=True)
-    except Conflict:
-        logger.exception("❌ Conflict: бот уже запущен")
-        sys.exit(1)
-
-
 if __name__ == "__main__":
-    try:
-        creds_dict = json.loads(os.environ["GOOGLE_CREDS_JSON"])
-        creds_dict["private_key"] = creds_dict["private_key"].replace("\\n", "\n")
-
-        creds = Credentials.from_service_account_info(
-            creds_dict,
-            scopes=[
-                "https://www.googleapis.com/auth/spreadsheets",
-                "https://www.googleapis.com/auth/drive",
-            ],
-        )
-
-        gc = gspread.authorize(creds)
-        SHEET = gc.open("бот фукуок вьетнам").sheet1
-
-        logger.info("✅ Google Sheets подключена")
-
-    except Exception:
-        logger.exception("❌ Ошибка Google Sheets")
-        SHEET = None
-
-    main()
+    port = int(os.environ.get("PORT", 10000))
+    uvicorn.run(
+        "main:app",  # Замените 'main' на имя вашего файла без .py
+        host="0.0.0.0",
+        port=port,
+        log_level="info"
+    )
