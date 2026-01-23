@@ -9,8 +9,12 @@ import uvicorn
 from fastapi import FastAPI, Request, BackgroundTasks
 from fastapi.responses import PlainTextResponse
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application
 from telegram.error import Conflict
+from telegram.ext import (
+    Application, 
+    CommandHandler,      
+    CallbackQueryHandler 
+)
 
 import gspread
 from google.oauth2.service_account import Credentials
