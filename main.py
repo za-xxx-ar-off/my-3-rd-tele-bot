@@ -3,16 +3,15 @@ import sys
 import json
 import re
 import logging
-import asyncio
 
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
     CommandHandler,
     CallbackQueryHandler,
     ContextTypes,
 )
-from telegram.error import Conflict, TelegramError
+from telegram.error import Conflict
 
 import gspread
 from google.oauth2.service_account import Credentials
@@ -29,16 +28,35 @@ logger = logging.getLogger(__name__)
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 
 # -------------------------------------------------
-# GOOGLE SHEETS
+# GOOGLE SHEETS CONFIG
 # -------------------------------------------------
 SHEET = None
 
 FIRST_QUESTION_ROW = 2
-QUESTION_COL = 2  # B
 IMAGE_COL = 1     # A
+QUESTION_COL = 2  # B
 
+RESTART_KEYBOARD = InlineKeyboardMarkup(
+    [[InlineKeyboardButton("🔄 Начать заново", callback_data="restart")]]
+)
+
+ANSWER_KEYBOARD = InlineKeyboardMarkup(
+    [
+        [
+            InlineKeyboardButton("✅ Был", callback_data="been"),
+            InlineKeyboardButton("❌ Не был", callback_data="not_been"),
+        ],
+        [
+            InlineKeyboardButton("⭐ Хочу побывать", callback_data="want"),
+            InlineKeyboardButton("⏭ Пропустить", callback_data="skip"),
+        ],
+    ]
+)
+
+# -------------------------------------------------
+# HELPERS
+# -------------------------------------------------
 def drive_to_direct(url: str | None) -> str | None:
-    """Google Drive → прямая ссылка"""
     if not url:
         return None
     if "drive.google.com" not in url:
@@ -50,7 +68,6 @@ def drive_to_direct(url: str | None) -> str | None:
 
 
 def get_user_column(sheet, username: str) -> int:
-    """Возвращает колонку пользователя, создаёт если нет"""
     header = sheet.row_values(1)
     if username in header:
         return header.index(username) + 1
@@ -59,93 +76,58 @@ def get_user_column(sheet, username: str) -> int:
     return col
 
 
-def _find_next_question_row(sheet, start_row: int) -> int | None:
-    """Ищет следующую строку с непустым вопросом в колонке QUESTION_COL."""
-    try:
-        all_values = sheet.get_all_values()
-        max_row = len(all_values) if all_values else 0
-        row = start_row
-        while row <= max_row:
-            val = sheet.cell(row, QUESTION_COL).value
-            if val and val.strip():
-                return row
-            row += 1
-        return None
-    except Exception:
-        logger.exception("❌ Ошибка при поиске следующего вопроса")
-        return None
+def find_next_question_row(sheet, start_row: int) -> int | None:
+    values = sheet.get_all_values()
+    row = start_row
+    while row <= len(values):
+        if sheet.cell(row, QUESTION_COL).value:
+            return row
+        row += 1
+    return None
 
 
-async def _send_question_by_row(update_or_query, context: ContextTypes.DEFAULT_TYPE, row: int):
-    """Отправляет вопрос (картинка + текст или только текст) в чат."""
-    if SHEET is None:
-        if hasattr(update_or_query, "reply_text"):
-            await update_or_query.reply_text("Ошибка: Google Sheets недоступна.")
-        else:
-            await update_or_query.message.reply_text("Ошибка: Google Sheets недоступна.")
-        return
+async def send_question(target, row: int):
+    image = drive_to_direct(SHEET.cell(row, IMAGE_COL).value)
+    text = SHEET.cell(row, QUESTION_COL).value or " "
 
-    image_url = drive_to_direct(SHEET.cell(row, IMAGE_COL).value)
-    question_text = SHEET.cell(row, QUESTION_COL).value or " "
-
-    keyboard = [
-        [
-            InlineKeyboardButton("✅ Был", callback_data="been"),
-            InlineKeyboardButton("❌ Не был", callback_data="not_been"),
-        ],
-        [
-            InlineKeyboardButton("⭐ Хочу побывать", callback_data="want"),
-            InlineKeyboardButton("⏭ Пропустить", callback_data="skip"),
-        ],
-    ]
-
-    if image_url:
-        if hasattr(update_or_query, "reply_photo"):
-            await update_or_query.reply_photo(photo=image_url, caption=question_text)
-        else:
-            await update_or_query.message.reply_photo(photo=image_url, caption=question_text)
+    if image:
+        await target.reply_photo(photo=image, caption=text)
     else:
-        if hasattr(update_or_query, "reply_text"):
-            await update_or_query.reply_text(question_text)
-        else:
-            await update_or_query.message.reply_text(question_text)
+        await target.reply_text(text)
 
-    if hasattr(update_or_query, "reply_text"):
-        await update_or_query.reply_text("Выбери вариант 👇", reply_markup=InlineKeyboardMarkup(keyboard))
-    else:
-        await update_or_query.message.reply_text("Выбери вариант 👇", reply_markup=InlineKeyboardMarkup(keyboard))
-
+    await target.reply_text("Выбери вариант 👇", reply_markup=ANSWER_KEYBOARD)
 
 # -------------------------------------------------
 # HANDLERS
 # -------------------------------------------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Инициализация: находим первый вопрос и отправляем его."""
-    if SHEET is None:
-        await update.message.reply_text("Ошибка: Google Sheets не подключена.")
-        return
-
-    row = _find_next_question_row(SHEET, FIRST_QUESTION_ROW)
+    row = find_next_question_row(SHEET, FIRST_QUESTION_ROW)
     if row is None:
-        await update.message.reply_text("Вопросы не найдены. Обратитесь к администратору.")
+        await update.message.reply_text("Вопросы не найдены.")
         return
 
     context.user_data["row"] = row
-    await _send_question_by_row(update.message, context, row)
+    await send_question(update.message, row)
 
 
 async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработка нажатий кнопок — запись ответа, защита от перезаписи, автопереход."""
     query = update.callback_query
     await query.answer()
 
-    if SHEET is None:
-        await query.edit_message_text("Ошибка: Google Sheets не подключена.")
+    # restart
+    if query.data == "restart":
+        context.user_data.clear()
+        row = find_next_question_row(SHEET, FIRST_QUESTION_ROW)
+        if row is None:
+            await query.edit_message_text("Вопросы не найдены.")
+            return
+        context.user_data["row"] = row
+        await send_question(query.message, row)
         return
 
     row = context.user_data.get("row")
     if not row:
-        await query.edit_message_text("Прогресс не найден. Нажмите /start, чтобы начать.")
+        await query.edit_message_text("Нажмите /start")
         return
 
     user = query.from_user
@@ -159,76 +141,46 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
     }
     answer = answer_map.get(query.data, "—")
 
-    try:
-        col = get_user_column(SHEET, username)
-    except Exception:
-        logger.exception("❌ Ошибка получения колонки пользователя")
-        await query.edit_message_text("Ошибка при определении колонки для записи.")
-        return
+    col = get_user_column(SHEET, username)
+    existing = SHEET.cell(row, col).value
 
-    try:
-        existing = SHEET.cell(row, col).value
-        if existing and existing.strip():
-            await query.edit_message_text(f"Вы уже ответили на этот вопрос ранее.\n\n👤 {username}\n📌 {existing}")
-            next_row = _find_next_question_row(SHEET, row + 1)
-            if next_row is None:
-                keyboard = ReplyKeyboardMarkup([["/start"]], one_time_keyboard=True, resize_keyboard=True)
-                await query.message.reply_text("Вопросы закончились. Нажмите /start, чтобы начать заново.", reply_markup=keyboard)
-                context.user_data.pop("row", None)
-                return
-            context.user_data["row"] = next_row
-            await _send_question_by_row(query, context, next_row)
-            return
-
+    if existing:
+        await query.edit_message_text(f"Вы уже отвечали: {existing}")
+    else:
         SHEET.update_cell(row, col, answer)
-    except Exception:
-        logger.exception("❌ Ошибка записи в Google Sheets")
-        await query.edit_message_text("Ошибка при записи ответа. Попробуйте позже.")
-        return
+        await query.edit_message_text(f"Спасибо 🙌\n\n👤 {username}\n📌 {answer}")
 
-    await query.edit_message_text(f"Спасибо 🙌\n\n👤 {username}\n📌 {answer}")
-
-    next_row = _find_next_question_row(SHEET, row + 1)
+    next_row = find_next_question_row(SHEET, row + 1)
     if next_row is None:
-        keyboard = ReplyKeyboardMarkup([["/start"]], one_time_keyboard=True, resize_keyboard=True)
-        await query.message.reply_text("Вопросы закончились. Нажмите /start, чтобы начать заново.", reply_markup=keyboard)
-        context.user_data.pop("row", None)
+        await query.message.reply_text(
+            "✅ Вопросы закончились.\n\nХочешь пройти опрос ещё раз?",
+            reply_markup=RESTART_KEYBOARD
+        )
+        context.user_data.clear()
         return
 
     context.user_data["row"] = next_row
-    await _send_question_by_row(query, context, next_row)
-
+    await send_question(query.message, next_row)
 
 # -------------------------------------------------
-# MAIN (polling only)
+# MAIN
 # -------------------------------------------------
-def _build_application():
+def main():
     app = Application.builder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(buttons))
-    return app
-
-def main():
-    application = _build_application()
-    logger.info("🤖 Подготовка к запуску бота (polling)")
 
     try:
-        # Запуск polling напрямую — без asyncio.run, чтобы не создавать вложенный event loop
-        logger.info("🚀 Запуск polling (drop_pending_updates=True)")
-        application.run_polling(drop_pending_updates=True)
+        logger.info("🤖 Бот запущен (polling)")
+        app.run_polling(drop_pending_updates=True)
     except Conflict:
-        logger.exception("❌ Conflict: другой getUpdates уже запущен. Убедитесь, что запущен только один экземпляр бота.")
-        sys.exit(2)
-    except Exception:
-        logger.exception("❌ Неожиданная ошибка при запуске бота")
+        logger.exception("❌ Conflict: бот уже запущен")
         sys.exit(1)
 
 
 if __name__ == "__main__":
-    # Инициализация Google Sheets
     try:
-        creds_json = os.environ.get("GOOGLE_CREDS_JSON")
-        creds_dict = json.loads(creds_json)
+        creds_dict = json.loads(os.environ["GOOGLE_CREDS_JSON"])
         creds_dict["private_key"] = creds_dict["private_key"].replace("\\n", "\n")
 
         creds = Credentials.from_service_account_info(
@@ -240,14 +192,12 @@ if __name__ == "__main__":
         )
 
         gc = gspread.authorize(creds)
-        sh = gc.open("бот фукуок вьетнам")
-        SHEET = sh.sheet1
+        SHEET = gc.open("бот фукуок вьетнам").sheet1
 
-        logger.info(f"📄 Найдена таблица: {sh.title}")
         logger.info("✅ Google Sheets подключена")
 
     except Exception:
-        logger.exception("❌ Google Sheets ошибка")
+        logger.exception("❌ Ошибка Google Sheets")
         SHEET = None
 
     main()
