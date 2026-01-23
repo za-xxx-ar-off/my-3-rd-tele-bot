@@ -210,6 +210,7 @@ async def webhook(request: Request, background_tasks: BackgroundTasks):
     #     return PlainTextResponse("Unauthorized", status_code=401)
 
     json_data = await request.json()
+    logger.info(f"📨 Получен update: {json_data}")
     update = Update.de_json(json_data, application.bot)
 
     if update:
