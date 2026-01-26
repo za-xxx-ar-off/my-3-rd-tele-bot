@@ -119,17 +119,26 @@ def find_next_question_row(sheet, start: int) -> int | None:
 
 async def send_question(message, row: int):
     try:
-        image = drive_to_direct(SHEET.cell(row, PHOTO_COL).value)
+        image_cell = SHEET.cell(row, PHOTO_COL).value
         text = SHEET.cell(row, TEXT_COL).value or ""
-
+        
+        # 🔥 ПРОВЕРКА КАРТИНКИ
+        image = drive_to_direct(image_cell)
+        if image and "drive.google.com" in image_cell:
+            # ТЕСТ: отправляем ТОЛЬКО текст при проблемах с Drive
+            await message.reply_text(f"📍 {text}\n\n[Картинка временно недоступна]", 
+                                   reply_markup=ANSWER_KEYBOARD)
+            return
+            
         if image:
             await message.reply_photo(photo=image, caption=text)
         else:
-            await message.reply_text(text)
-
-        await message.reply_text("Выбери вариант 👇", reply_markup=ANSWER_KEYBOARD)
+            await message.reply_text(f"📍 {text}", reply_markup=ANSWER_KEYBOARD)
+            
     except Exception as e:
-        await message.reply_text(f"Ошибка вопроса: {str(e)}")
+        logger.error(f"Send question error: {e}")
+        await message.reply_text("❌ Временная ошибка. Попробуйте /start", 
+                               reply_markup=ANSWER_KEYBOARD)
 
 # -------------------------------------------------
 # ERROR HANDLER
