@@ -2,6 +2,8 @@ import os
 import json
 import re
 import logging
+import time
+from functools import lru_cache
 
 from fastapi import FastAPI, Request
 from fastapi.responses import PlainTextResponse
@@ -34,9 +36,11 @@ BOT_TOKEN = os.environ["BOT_TOKEN"]
 RENDER_HOST = os.environ.get("RENDER_EXTERNAL_HOSTNAME")
 
 # -------------------------------------------------
-# GOOGLE SHEETS
+# GOOGLE SHEETS + КЭШ
 # -------------------------------------------------
 SHEET = None
+user_cache = {}  # username → column
+cache_time = {}  # username → timestamp
 
 FIRST_QUESTION_ROW = 2
 PHOTO_COL = 1      # A
@@ -64,7 +68,7 @@ RESTART_KEYBOARD = InlineKeyboardMarkup(
 )
 
 # -------------------------------------------------
-# HELPERS
+# HELPERS (с КЭШЕМ)
 # -------------------------------------------------
 def drive_to_direct(url: str | None) -> str | None:
     if not url:
@@ -79,18 +83,32 @@ def drive_to_direct(url: str | None) -> str | None:
 
     return f"https://drive.google.com/uc?id={m.group(1)}"
 
+def get_user_column_cached(username: str) -> int | None:
+    """🔥 КЭШ НА 10 МИНУТ - ИСПРАВЛЯЕТ 429 ERROR"""
+    now = time.time()
+    
+    # Проверяем кэш
+    if username in user_cache and now - cache_time.get(username, 0) < 600:
+        return user_cache[username]
+    
+    try:
+        # Оригинальная функция
+        header = SHEET.row_values(1)
+        for i in range(USERS_START_COL - 1, len(header)):
+            if header[i] == username:
+                user_cache[username] = i + 1
+                cache_time[username] = now
+                return i + 1
 
-def get_user_column(sheet, username: str) -> int:
-    header = sheet.row_values(1)
-
-    for i in range(USERS_START_COL - 1, len(header)):
-        if header[i] == username:
-            return i + 1
-
-    col = max(len(header) + 1, USERS_START_COL)
-    sheet.update_cell(1, col, username)
-    return col
-
+        col = max(len(header) + 1, USERS_START_COL)
+        SHEET.update_cell(1, col, username)
+        user_cache[username] = col
+        cache_time[username] = now
+        return col
+        
+    except Exception as e:
+        logger.error(f"Cache error: {e}")
+        return user_cache.get(username)  # Возвращаем старый кэш
 
 def find_next_question_row(sheet, start: int) -> int | None:
     values = sheet.get_all_values()
@@ -99,84 +117,98 @@ def find_next_question_row(sheet, start: int) -> int | None:
             return row
     return None
 
-
 async def send_question(message, row: int):
-    image = drive_to_direct(SHEET.cell(row, PHOTO_COL).value)
-    text = SHEET.cell(row, TEXT_COL).value or ""
+    try:
+        image = drive_to_direct(SHEET.cell(row, PHOTO_COL).value)
+        text = SHEET.cell(row, TEXT_COL).value or ""
 
-    if image:
-        await message.reply_photo(photo=image, caption=text)
-    else:
-        await message.reply_text(text)
+        if image:
+            await message.reply_photo(photo=image, caption=text)
+        else:
+            await message.reply_text(text)
 
-    await message.reply_text("Выбери вариант 👇", reply_markup=ANSWER_KEYBOARD)
+        await message.reply_text("Выбери вариант 👇", reply_markup=ANSWER_KEYBOARD)
+    except Exception as e:
+        await message.reply_text(f"Ошибка вопроса: {str(e)}")
+
+# -------------------------------------------------
+# ERROR HANDLER
+# -------------------------------------------------
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """🔥 СКРЫВАЕТ ОШИБКИ ОТ ПОЛЬЗОВАТЕЛЕЙ"""
+    logger.error(f"Bot error: {context.error}")
 
 # -------------------------------------------------
 # HANDLERS
 # -------------------------------------------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    row = find_next_question_row(SHEET, FIRST_QUESTION_ROW)
-    if row is None:
-        await update.message.reply_text("Вопросы не найдены.")
-        return
-
-    context.user_data.clear()
-    context.user_data["row"] = row
-    await send_question(update.message, row)
-
-
-async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-
-    # restart
-    if query.data == "restart":
-        context.user_data.clear()
+    try:
         row = find_next_question_row(SHEET, FIRST_QUESTION_ROW)
         if row is None:
-            await query.edit_message_text("Вопросы не найдены.")
+            await update.message.reply_text("Вопросы не найдены.")
             return
 
-        context.user_data["row"] = row
-        await send_question(query.message, row)
-        return
-
-    row = context.user_data.get("row")
-    if not row:
-        await query.edit_message_text("Нажмите /start")
-        return
-
-    user = query.from_user
-    username = f"@{user.username}" if user.username else str(user.id)
-
-    answer_map = {
-        "been": "Был",
-        "not_been": "Не был",
-        "want": "Хочу побывать",
-        "skip": "Пропущено",
-    }
-    answer = answer_map.get(query.data, "—")
-
-    col = get_user_column(SHEET, username)
-
-    # 🔥 ВСЕГДА ПЕРЕЗАПИСЫВАЕМ ОТВЕТ
-    SHEET.update_cell(row, col, answer)
-
-    await query.edit_message_text(
-        f"Ответ сохранён 🙌\n\n👤 {username}\n📌 {answer}"
-    )
-
-    next_row = find_next_question_row(SHEET, row + 1)
-    if next_row is None:
-        await query.message.reply_text(
-            "✅ Вопросы закончились.\n\nХочешь пройти опрос ещё раз?",
-            reply_markup=RESTART_KEYBOARD
-        )
         context.user_data.clear()
-        return
+        context.user_data["row"] = row
+        await send_question(update.message, row)
+    except Exception:
+        await update.message.reply_text("Попробуйте позже /start")
 
-    context.user_data["row"] = next_row
-    await send_question(query.message, next_row)
+async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        query = update.callback_query
+        await query.answer()
+
+        # restart
+        if query.data == "restart":
+            context.user_data.clear()
+            row = find_next_question_row(SHEET, FIRST_QUESTION_ROW)
+            if row is None:
+                await query.edit_message_text("Вопросы не найдены.")
+                return
+
+            context.user_data["row"] = row
+            await send_question(query.message, row)
+            return
+
+        row = context.user_data.get("row")
+        if not row:
+            await query.edit_message_text("Нажмите /start")
+            return
+
+        user = query.from_user
+        username = f"@{user.username}" if user.username else str(user.id)
+
+        answer_map = {
+            "been": "Был",
+            "not_been": "Не был",
+            "want": "Хочу побывать",
+            "skip": "Пропущено",
+        }
+        answer = answer_map.get(query.data, "—")
+
+        col = get_user_column_cached(username)  # 🔥 КЭШ!
+        if col:
+            SHEET.update_cell(row, col, answer)
+
+        await query.edit_message_text(
+            f"Ответ сохранён 🙌\n\n👤 {username}\n📌 {answer}"
+        )
+
+        next_row = find_next_question_row(SHEET, row + 1)
+        if next_row is None:
+            await query.message.reply_text(
+                "✅ Вопросы закончились.\n\nХочешь пройти опрос ещё раз?",
+                reply_markup=RESTART_KEYBOARD
+            )
+            context.user_data.clear()
+            return
+
+        context.user_data["row"] = next_row
+        await send_question(query.message, next_row)
+        
+    except Exception:
+        await update.callback_query.edit_message_text("Ошибка. Нажмите /start")
 
 # -------------------------------------------------
 # FASTAPI + TELEGRAM
@@ -186,15 +218,15 @@ app = FastAPI()
 telegram_app = Application.builder().token(BOT_TOKEN).build()
 telegram_app.add_handler(CommandHandler("start", start))
 telegram_app.add_handler(CallbackQueryHandler(buttons))
-
+telegram_app.add_error_handler(error_handler)  # 🔥 ERROR HANDLER
 
 @app.on_event("startup")
 async def on_startup():
+    global SHEET
     await telegram_app.initialize()
     webhook_url = f"https://{RENDER_HOST}/webhook"
     await telegram_app.bot.set_webhook(webhook_url)
     logger.info(f"🚀 Webhook установлен: {webhook_url}")
-
 
 @app.post("/webhook")
 async def webhook(request: Request):
@@ -202,7 +234,6 @@ async def webhook(request: Request):
     update = Update.de_json(data, telegram_app.bot)
     await telegram_app.process_update(update)
     return PlainTextResponse("OK")
-
 
 @app.get("/ping")
 async def ping():
