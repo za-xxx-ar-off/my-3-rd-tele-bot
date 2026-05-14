@@ -1,231 +1,276 @@
 import os
 import json
-import re
 import logging
-
-from fastapi import FastAPI, Request
-from fastapi.responses import PlainTextResponse
-
-from telegram import (
-    Update,
-    InlineKeyboardButton,
-    InlineKeyboardMarkup,
-)
-from telegram.ext import (
-    Application,
-    CommandHandler,
-    CallbackQueryHandler,
-    ContextTypes,
-)
-
+import asyncio
 import gspread
-from google.oauth2.service_account import Credentials
+from aiohttp import web
 
-# -------------------------------------------------
-# LOGGING
-# -------------------------------------------------
+from telegram import Update, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
+from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, MessageHandler, filters
+
 logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
 
-# -------------------------------------------------
-# ENV
-# -------------------------------------------------
 BOT_TOKEN = os.environ["BOT_TOKEN"]
-RENDER_HOST = os.environ.get("RENDER_EXTERNAL_HOSTNAME")
+SHEET_ID = os.environ["SHEET_ID"]
+SERVICE_ACCOUNT_JSON = os.environ["SERVICE_ACCOUNT_JSON"]
+WEBHOOK_URL = os.environ["WEBHOOK_URL"]
+PORT = int(os.environ.get("PORT", 10000))
 
-# -------------------------------------------------
-# GOOGLE SHEETS
-# -------------------------------------------------
-SHEET = None
+# ===== GOOGLE SHEETS =====
+creds = json.loads(SERVICE_ACCOUNT_JSON)
+gc = gspread.service_account_from_dict(creds)
+sh = gc.open_by_key(SHEET_ID)
+ws = sh.sheet1
 
-FIRST_QUESTION_ROW = 2
-PHOTO_COL = 1      # A
-TEXT_COL = 2       # B
-USERS_START_COL = 4  # D
+# ===== CACHE =====
+CACHE = {}
 
-# -------------------------------------------------
-# KEYBOARDS
-# -------------------------------------------------
-ANSWER_KEYBOARD = InlineKeyboardMarkup(
-    [
-        [
-            InlineKeyboardButton("✅ Был", callback_data="been"),
-            InlineKeyboardButton("❌ Не был", callback_data="not_been"),
-        ],
-        [
-            InlineKeyboardButton("⭐ Хочу побывать", callback_data="want"),
-            InlineKeyboardButton("⏭ Пропустить", callback_data="skip"),
-        ],
-    ]
-)
+# ===== GOOGLE DRIVE =====
+def convert_drive_url(url: str) -> str:
+    if "drive.google.com" in url:
+        try:
+            if "/file/d/" in url:
+                file_id = url.split("/d/")[1].split("/")[0]
+            elif "id=" in url:
+                file_id = url.split("id=")[1].split("&")[0]
+            else:
+                return url
+            return f"https://drive.google.com/uc?export=download&id={file_id}"
+        except:
+            return url
+    return url
 
-RESTART_KEYBOARD = InlineKeyboardMarkup(
-    [[InlineKeyboardButton("🔄 Начать заново", callback_data="restart")]]
-)
+# ===== TEXTS =====
+TEXTS = {
+    "ru": {
+        "menu": "Чем я могу помочь?",
+        "catalog": "Каталог",
+        "contact": "Связаться",
+        "location": "Местоположение",
+        "more": "Еще",
+        "back": "Назад",
+        "next": "Еще или Назад?",
+        "finished": "Фото закончились, выбрать другую категорию?",
+        "yes": "Да",
+        "no": "Нет",
 
-# -------------------------------------------------
-# HELPERS
-# -------------------------------------------------
-def drive_to_direct(url: str | None) -> str | None:
-    if not url:
-        return None
-    url = url.strip()
-    if "drive.google.com" not in url:
-        return url
+        "kitchen": "Кухонные гарнитуры",
+        "bedroom": "Спальни",
+        "other": "Остальная мебель",
+        "soft": "Мягкая мебель",
+        "video": "Видео"
+    },
+    "uz": {
+        "menu": "Qanday yordam bera olaman?",
+        "catalog": "Katalog",
+        "contact": "Bog‘lanish",
+        "location": "Joylashuv",
+        "more": "Yana",
+        "back": "Orqaga",
+        "next": "Yana yoki Orqaga?",
+        "finished": "Rasmlar tugadi, boshqa bo‘lim tanlaysizmi?",
+        "yes": "Ha",
+        "no": "Yo‘q",
 
-    m = re.search(r"/d/([a-zA-Z0-9_-]+)", url)
-    if not m:
-        return None
-
-    return f"https://drive.google.com/uc?id={m.group(1)}"
-
-
-def get_user_column(sheet, username: str) -> int:
-    header = sheet.row_values(1)
-
-    for i in range(USERS_START_COL - 1, len(header)):
-        if header[i] == username:
-            return i + 1
-
-    col = max(len(header) + 1, USERS_START_COL)
-    sheet.update_cell(1, col, username)
-    return col
-
-
-def find_next_question_row(sheet, start: int) -> int | None:
-    values = sheet.get_all_values()
-    for row in range(start, len(values) + 1):
-        if sheet.cell(row, TEXT_COL).value:
-            return row
-    return None
-
-
-async def send_question(message, row: int):
-    image = drive_to_direct(SHEET.cell(row, PHOTO_COL).value)
-    text = SHEET.cell(row, TEXT_COL).value or ""
-
-    if image:
-        await message.reply_photo(photo=image, caption=text)
-    else:
-        await message.reply_text(text)
-
-    await message.reply_text("Выбери вариант 👇", reply_markup=ANSWER_KEYBOARD)
-
-# -------------------------------------------------
-# HANDLERS
-# -------------------------------------------------
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    row = find_next_question_row(SHEET, FIRST_QUESTION_ROW)
-    if row is None:
-        await update.message.reply_text("Вопросы не найдены.")
-        return
-
-    context.user_data.clear()
-    context.user_data["row"] = row
-    await send_question(update.message, row)
-
-
-async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-
-    # restart
-    if query.data == "restart":
-        context.user_data.clear()
-        row = find_next_question_row(SHEET, FIRST_QUESTION_ROW)
-        if row is None:
-            await query.edit_message_text("Вопросы не найдены.")
-            return
-
-        context.user_data["row"] = row
-        await send_question(query.message, row)
-        return
-
-    row = context.user_data.get("row")
-    if not row:
-        await query.edit_message_text("Нажмите /start")
-        return
-
-    user = query.from_user
-    username = f"@{user.username}" if user.username else str(user.id)
-
-    answer_map = {
-        "been": "Был",
-        "not_been": "Не был",
-        "want": "Хочу побывать",
-        "skip": "Пропущено",
+        "kitchen": "Oshxona garniturlari",
+        "bedroom": "Yotoqxonalar",
+        "other": "Boshqa mebellar",
+        "soft": "Yumshoq mebel",
+        "video": "Video"
     }
-    answer = answer_map.get(query.data, "—")
+}
 
-    col = get_user_column(SHEET, username)
+# ===== KEYBOARDS =====
+def kb_main(lang):
+    t = TEXTS[lang]
+    return ReplyKeyboardMarkup([[t["catalog"], t["contact"], t["location"]]], resize_keyboard=True)
 
-    # 🔥 ВСЕГДА ПЕРЕЗАПИСЫВАЕМ ОТВЕТ
-    SHEET.update_cell(row, col, answer)
+def kb_catalog(lang):
+    t = TEXTS[lang]
+    return ReplyKeyboardMarkup([
+        [t["kitchen"], t["bedroom"]],
+        [t["other"], t["soft"]],
+        [t["video"]],
+        [t["back"]]
+    ], resize_keyboard=True)
 
-    await query.edit_message_text(
-        f"Ответ сохранён 🙌\n\n👤 {username}\n📌 {answer}"
+def kb_more(lang):
+    t = TEXTS[lang]
+    return ReplyKeyboardMarkup([[t["more"], t["back"]]], resize_keyboard=True)
+
+def kb_yesno(lang):
+    t = TEXTS[lang]
+    return ReplyKeyboardMarkup([[t["yes"], t["no"]]], resize_keyboard=True)
+
+def get_lang(u):
+    return u.get("lang", "ru")
+
+# ===== START =====
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "Выберите язык",
+        reply_markup=ReplyKeyboardMarkup([["Узбекский 🇺🇿", "Русский 🇷🇺"]], resize_keyboard=True)
     )
 
-    next_row = find_next_question_row(SHEET, row + 1)
-    if next_row is None:
-        await query.message.reply_text(
-            "✅ Вопросы закончились.\n\nХочешь пройти опрос ещё раз?",
-            reply_markup=RESTART_KEYBOARD
-        )
-        context.user_data.clear()
+# ===== HANDLER =====
+async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text
+    u = context.user_data
+
+    if text == "Русский 🇷🇺":
+        u.clear()
+        u["lang"] = "ru"
+        await update.message.reply_text(TEXTS["ru"]["menu"], reply_markup=kb_main("ru"))
         return
 
-    context.user_data["row"] = next_row
-    await send_question(query.message, next_row)
+    if text == "Узбекский 🇺🇿":
+        u.clear()
+        u["lang"] = "uz"
+        await update.message.reply_text(TEXTS["uz"]["menu"], reply_markup=kb_main("uz"))
+        return
 
-# -------------------------------------------------
-# FASTAPI + TELEGRAM
-# -------------------------------------------------
-app = FastAPI()
+    lang = get_lang(u)
+    t = TEXTS[lang]
 
-telegram_app = Application.builder().token(BOT_TOKEN).build()
-telegram_app.add_handler(CommandHandler("start", start))
-telegram_app.add_handler(CallbackQueryHandler(buttons))
+    if text == t["catalog"]:
+        await update.message.reply_text(t["catalog"], reply_markup=kb_catalog(lang))
+        return
 
+    if text == t["contact"]:
+        await update.message.reply_text(ws.acell("F1").value or "-", reply_markup=kb_main(lang))
+        return
 
-@app.on_event("startup")
-async def on_startup():
-    await telegram_app.initialize()
-    webhook_url = f"https://{RENDER_HOST}/webhook"
-    await telegram_app.bot.set_webhook(webhook_url)
-    logger.info(f"🚀 Webhook установлен: {webhook_url}")
+    if text == t["location"]:
+        await update.message.reply_text(ws.acell("G1").value or "-", reply_markup=kb_main(lang))
+        return
 
+    if text == t["yes"]:
+        await update.message.reply_text(t["catalog"], reply_markup=kb_catalog(lang))
+        return
 
-@app.post("/webhook")
-async def webhook(request: Request):
+    if text == t["no"]:
+        await update.message.reply_text(t["menu"], reply_markup=kb_main(lang))
+        return
+
+    if text == t["back"]:
+        await update.message.reply_text(t["menu"], reply_markup=kb_main(lang))
+        return
+
+    if text == t["more"]:
+        await send_page(update, context, True)
+        return
+
+    mapping = {
+        t["kitchen"]: ("A", "photo"),
+        t["bedroom"]: ("B", "photo"),
+        t["other"]: ("C", "photo"),
+        t["video"]: ("D", "video"),
+        t["soft"]: ("E", "photo"),
+    }
+
+    if text in mapping:
+        col, typ = mapping[text]
+        u["col"] = col
+        u["type"] = typ
+        u["idx"] = 1
+        await send_page(update, context)
+        return
+
+# ===== CACHE SEND =====
+async def send_cached(bot_method, chat_id, url, is_video=False):
+    if url in CACHE:
+        return await bot_method(chat_id, CACHE[url])
+
+    msg = await bot_method(chat_id, url)
+
+    try:
+        if is_video:
+            CACHE[url] = msg.video.file_id
+        else:
+            CACHE[url] = msg.photo[-1].file_id
+    except:
+        pass
+
+    return msg
+
+# ===== SEND PAGE =====
+async def send_page(update: Update, context: ContextTypes.DEFAULT_TYPE, next_page=False):
+    u = context.user_data
+    lang = get_lang(u)
+    t = TEXTS[lang]
+
+    col = u.get("col")
+    typ = u.get("type", "photo")
+
+    idx = u.get("idx", 1)
+    if next_page:
+        idx += 10
+
+    values = ws.col_values(ord(col) - 64)
+
+    items = []
+    for i in range(idx - 1, min(idx + 9, len(values))):
+        url = convert_drive_url(values[i].strip())
+        if url:
+            items.append(url)
+
+    if not items:
+        await update.message.reply_text(t["finished"], reply_markup=kb_yesno(lang))
+        return
+
+    u["idx"] = idx
+
+    # 🔥 УБИРАЕМ КЛАВИАТУРУ
+    await update.message.reply_text("...", reply_markup=ReplyKeyboardRemove())
+
+    for url in items:
+        try:
+            if typ == "video":
+                await send_cached(context.bot.send_video, update.effective_chat.id, url, True)
+            else:
+                await send_cached(context.bot.send_photo, update.effective_chat.id, url)
+
+            await asyncio.sleep(0.3)
+
+        except Exception as e:
+            print("ERROR:", e)
+
+    # 🔥 ПОСЛЕ 10 ШТУК ПОКАЗЫВАЕМ КНОПКИ
+    if idx + 10 <= len(values):
+        await update.message.reply_text(t["next"], reply_markup=kb_more(lang))
+    else:
+        await update.message.reply_text(t["finished"], reply_markup=kb_yesno(lang))
+
+# ===== WEBHOOK =====
+async def handle(request):
     data = await request.json()
-    update = Update.de_json(data, telegram_app.bot)
-    await telegram_app.process_update(update)
-    return PlainTextResponse("OK")
+    update = Update.de_json(data, request.app["bot"])
+    await request.app["app"].process_update(update)
+    return web.Response()
 
+# ===== MAIN =====
+async def main():
+    app = ApplicationBuilder().token(BOT_TOKEN).build()
 
-@app.get("/ping")
-async def ping():
-    return PlainTextResponse("OK")
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
 
-# -------------------------------------------------
-# GOOGLE SHEETS INIT
-# -------------------------------------------------
-try:
-    creds_dict = json.loads(os.environ["GOOGLE_CREDS_JSON"])
-    creds_dict["private_key"] = creds_dict["private_key"].replace("\\n", "\n")
+    await app.initialize()
+    await app.start()
 
-    creds = Credentials.from_service_account_info(
-        creds_dict,
-        scopes=[
-            "https://www.googleapis.com/auth/spreadsheets",
-            "https://www.googleapis.com/auth/drive",
-        ],
-    )
+    await app.bot.set_webhook(WEBHOOK_URL + "/" + BOT_TOKEN)
 
-    gc = gspread.authorize(creds)
-    SHEET = gc.open("бот фукуок вьетнам").sheet1
-    logger.info("✅ Google Sheets подключена")
+    aio = web.Application()
+    aio["bot"] = app.bot
+    aio["app"] = app
+    aio.router.add_post(f"/{BOT_TOKEN}", handle)
 
-except Exception:
-    logger.exception("❌ Ошибка Google Sheets")
+    runner = web.AppRunner(aio)
+    await runner.setup()
+    await web.TCPSite(runner, "0.0.0.0", PORT).start()
+
+    while True:
+        await asyncio.sleep(3600)
+
+if __name__ == "__main__":
+    asyncio.run(main())
