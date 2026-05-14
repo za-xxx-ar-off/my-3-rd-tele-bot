@@ -276,5 +276,6 @@ if __name__ == "__main__":
     try:
         asyncio.run(main())
     except Exception as e:
+        print("FATAL ERROR:")
         import traceback
-        print(traceback.format_exc())
+        traceback.print_exc()
