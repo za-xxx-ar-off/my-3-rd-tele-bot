@@ -1,9 +1,4 @@
-aiogram==3.13.1
-fastapi==0.115.0
-uvicorn[standard]==0.32.0
-gspread==6.1.0
+python-telegram-bot==21.6
+aiohttp==3.10.5
+gspread==6.1.2
 google-auth==2.35.0
-google-auth-oauthlib==1.2.1
-google-auth-httplib2==0.2.0
-gunicorn==23.0.0
-python-telegram-bot==21.4
